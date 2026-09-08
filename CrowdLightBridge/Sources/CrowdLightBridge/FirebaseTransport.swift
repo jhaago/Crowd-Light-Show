@@ -4,6 +4,8 @@ final class FirebaseTransport {
     private let session: URLSession
     private let stateLock = NSLock()
     private var _serverOffsetMs: Double = 0
+    private let commandLock = NSLock()
+    private var latestCommands: [String: (revision: UInt64, command: [String: Any])] = [:]
     var authToken: String = ""
 
     var serverOffsetMs: Double {
@@ -164,8 +166,69 @@ final class FirebaseTransport {
             return
         }
 
-        let url = "\(base)/crowdlight/\(pathComponent(room))/command.json?print=silent"
-        putJSON(urlString: url, json: command, completion: completion)
+        let roomPath = pathComponent(room)
+        let key = base + "|" + roomPath
+        let revision = commandRevision(command)
+
+        if revision > 0 {
+            commandLock.lock()
+            if latestCommands[key]?.revision ?? 0 <= revision {
+                latestCommands[key] = (revision, command)
+            }
+            commandLock.unlock()
+        }
+
+        let url = "\(base)/crowdlight/\(roomPath)/command.json?print=silent"
+        putJSON(urlString: url, json: command) { [weak self] result in
+            completion(result)
+
+            // A REST task can finish after a newer command task. If that
+            // happens, immediately write the newest revision again so Firebase
+            // cannot remain stuck on the stale command.
+            if case .success = result, revision > 0 {
+                self?.repairIfSuperseded(
+                    key: key,
+                    appliedRevision: revision,
+                    urlString: url
+                )
+            }
+        }
+    }
+
+    private func commandRevision(_ command: [String: Any]) -> UInt64 {
+        if let number = command["revision"] as? NSNumber {
+            return number.uint64Value
+        }
+        if let value = command["revision"] as? UInt64 {
+            return value
+        }
+        if let value = command["revision"] as? Int, value >= 0 {
+            return UInt64(value)
+        }
+        return 0
+    }
+
+    private func repairIfSuperseded(
+        key: String,
+        appliedRevision: UInt64,
+        urlString: String
+    ) {
+        commandLock.lock()
+        let newest = latestCommands[key]
+        commandLock.unlock()
+
+        guard let newest, newest.revision > appliedRevision else { return }
+
+        putJSON(urlString: urlString, json: newest.command) { [weak self] result in
+            guard case .success = result else { return }
+            // Another cue may have become newest while this repair was in
+            // flight, so check once more using the revision just applied.
+            self?.repairIfSuperseded(
+                key: key,
+                appliedRevision: newest.revision,
+                urlString: urlString
+            )
+        }
     }
 
     private func setServerOffset(_ value: Double) {
