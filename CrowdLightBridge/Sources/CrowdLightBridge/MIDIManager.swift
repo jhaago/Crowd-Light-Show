@@ -18,6 +18,15 @@ private func crowdLightMIDIReadProc(
     manager.handle(packetList: packetList)
 }
 
+private func crowdLightMIDINotifyProc(
+    _ message: UnsafePointer<MIDINotification>,
+    _ refCon: UnsafeMutableRawPointer?
+) {
+    guard let refCon else { return }
+    let manager = Unmanaged<MIDIManager>.fromOpaque(refCon).takeUnretainedValue()
+    manager.handleMIDISystemChanged()
+}
+
 final class MIDIManager: ObservableObject {
     @Published var sources: [MIDISourceInfo] = []
     @Published var connectedSourceID: Int32 = 0
@@ -25,6 +34,7 @@ final class MIDIManager: ObservableObject {
     @Published var lastMessage: String = "No MIDI received"
 
     var onNoteOn: ((Int, Int, Int) -> Void)?
+    var onSourceLost: (() -> Void)?
 
     private var client = MIDIClientRef()
     private var inputPort = MIDIPortRef()
@@ -44,13 +54,18 @@ final class MIDIManager: ObservableObject {
     }
 
     private func createClient() {
-        let clientStatus = MIDIClientCreate("CrowdLight Bridge" as CFString, nil, nil, &client)
+        let refCon = Unmanaged.passUnretained(self).toOpaque()
+        let clientStatus = MIDIClientCreate(
+            "CrowdLight Bridge" as CFString,
+            crowdLightMIDINotifyProc,
+            refCon,
+            &client
+        )
         guard clientStatus == noErr else {
             lastMessage = "Could not create CoreMIDI client (\(clientStatus))"
             return
         }
 
-        let refCon = Unmanaged.passUnretained(self).toOpaque()
         let portStatus = MIDIInputPortCreate(
             client,
             "CrowdLight MIDI Input" as CFString,
@@ -105,6 +120,26 @@ final class MIDIManager: ObservableObject {
             DispatchQueue.main.async {
                 self.sources = sorted
             }
+        }
+    }
+
+    fileprivate func handleMIDISystemChanged() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let previousID = self.connectedSourceID
+            self.refreshSources()
+
+            guard previousID != 0 else { return }
+            guard !self.sources.contains(where: { $0.id == previousID }) else { return }
+
+            if self.connectedEndpoint != 0 {
+                MIDIPortDisconnectSource(self.inputPort, self.connectedEndpoint)
+                self.connectedEndpoint = 0
+            }
+            self.connectedSourceID = 0
+            self.connectedSourceName = "MIDI source lost"
+            self.lastMessage = "Selected MIDI source disappeared. External cues have been disarmed."
+            self.onSourceLost?()
         }
     }
 
