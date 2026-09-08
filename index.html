@@ -338,6 +338,7 @@ let firebaseDb = null;
 let firebaseDbUrl = '';
 let firebaseInfoUnsubs = [];
 let firebaseConnected = false;
+let clockRefreshTimer = null;
 let localChannel = null;
 let patternTimer = null;
 let patternStopTimer = null;
@@ -736,7 +737,10 @@ document.addEventListener('visibilitychange', async()=>{
     failSafeAudienceOff('CrowdLight paused while this page is in the background.');
     return;
   }
-  if(document.visibilityState === 'visible' && track && !wakeLock) requestWakeLock();
+  if(document.visibilityState === 'visible' && track){
+    if(dbUrl) await getServerOffset();
+    if(!wakeLock) requestWakeLock();
+  }
 });
 window.addEventListener('pagehide', ()=>{
   // pagehide may be the last JavaScript we receive. Stop the camera stream
@@ -764,6 +768,18 @@ async function ensureFirebase(){
 function clearFirebaseInfo(){
   firebaseInfoUnsubs.forEach(fn=>{ try{fn()}catch(e){} });
   firebaseInfoUnsubs=[];
+  if(clockRefreshTimer){
+    clearInterval(clockRefreshTimer);
+    clockRefreshTimer=null;
+  }
+}
+function startClockRefresh(){
+  if(clockRefreshTimer) clearInterval(clockRefreshTimer);
+  clockRefreshTimer=null;
+  if(TEST_MODE || !dbUrl) return;
+  clockRefreshTimer=setInterval(()=>{
+    if(document.visibilityState==='visible') getServerOffset();
+  },45000);
 }
 
 async function watchFirebaseInfo(){
@@ -822,6 +838,8 @@ async function watchFirebaseInfo(){
       $('#offsetState').textContent='UNAVAILABLE';
     }
   }));
+
+  startClockRefresh();
 }
 
 async function getServerOffset(){
