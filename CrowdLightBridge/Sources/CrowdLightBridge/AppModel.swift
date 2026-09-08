@@ -17,7 +17,7 @@ final class AppModel: ObservableObject {
     @Published var firebaseState: String = "Not tested"
     @Published var firebaseConnected: Bool = false
     @Published var clockOffsetText: String = "—"
-    @Published var currentState: String = "BLACKOUT"
+    @Published var currentState: String = "NO COMMAND SENT"
     @Published var lastCue: String = "No cue received"
     @Published var logs: [BridgeLogEntry] = []
 
