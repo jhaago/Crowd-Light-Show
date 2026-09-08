@@ -1,0 +1,31 @@
+name: Browser Test CrowdLight Web
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'index.html'
+      - 'tests/crowdlight-browser.mjs'
+      - '.github/workflows/browser-test-crowdlight-web.yml'
+
+jobs:
+  browser-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Playwright
+        run: |
+          npm install --no-save playwright@1.55.0
+          npx playwright install --with-deps chromium
+
+      - name: Start local CrowdLight server
+        run: |
+          python3 -m http.server 4173 >/tmp/crowdlight-http.log 2>&1 &
+          echo $! > /tmp/crowdlight-http.pid
+          sleep 1
+
+      - name: Run master and audience browser regression tests
+        run: node tests/crowdlight-browser.mjs
