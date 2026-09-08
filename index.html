@@ -1001,7 +1001,7 @@ function commandBase(mode){
   return {id:uid(),mode,room,issuedAt:nowServer(),validUntil:nowServer()+COMMAND_TTL};
 }
 async function masterOff(){
-  beginMasterAction();
+  const actionVersion=beginMasterAction();
   // Cancel the old repeating command BEFORE the network write. In v0.5 the
   // keepalive could fire while BLACKOUT was being sent and overwrite it.
   currentMasterCommand=null;
@@ -1023,7 +1023,11 @@ async function masterOff(){
   // A second off write shortly afterwards also protects against an already
   // in-flight stale keepalive from a previous mode.
   if(ok){
-    setTimeout(()=>pushRemoteCommand({...commandBase('off'),validUntil:nowServer()+60000}),350);
+    setTimeout(()=>{
+      if(masterActionVersion===actionVersion){
+        pushRemoteCommand({...commandBase('off'),validUntil:nowServer()+60000});
+      }
+    },350);
   }
 }
 
