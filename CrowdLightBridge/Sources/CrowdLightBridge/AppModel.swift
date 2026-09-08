@@ -246,7 +246,7 @@ final class AppModel: ObservableObject {
             restoreWorkItem = work
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.3, execute: work)
 
-        case .unison, .twinkle, .sparkle, .constellation:
+        case .unison, .shimmer, .twinkle, .sparkle, .glow, .fireflies, .alternate, .constellation, .build, .drop:
             var command = baseCommand(mode: "pattern")
             let phase = firebase.estimatedServerNowMs() + 1_200
             command["bpm"] = bpm
@@ -323,7 +323,7 @@ final class AppModel: ObservableObject {
         switch action {
         case .allOn:
             return "ALL LIGHTS ON"
-        case .unison, .twinkle, .sparkle, .constellation:
+        case .unison, .shimmer, .twinkle, .sparkle, .glow, .fireflies, .alternate, .constellation, .build, .drop:
             let commandBPM: Int
             if let n = command["bpm"] as? NSNumber {
                 commandBPM = n.intValue
