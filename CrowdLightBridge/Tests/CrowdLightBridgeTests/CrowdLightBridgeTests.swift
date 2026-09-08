@@ -6,21 +6,31 @@ final class CrowdLightBridgeTests: XCTestCase {
     func testDefaultCueMapHasUniqueNotes() {
         let notes = CueMapping.defaults.map(\.note)
         XCTAssertEqual(notes.count, Set(notes).count)
-        XCTAssertEqual(notes, [24, 25, 26, 27, 28, 29, 30])
+        XCTAssertEqual(notes, Array(24...36))
     }
 
     func testDefaultCueActionsMatchExpectedOrder() {
         XCTAssertEqual(
             CueMapping.defaults.map(\.action),
-            [.blackout, .allOn, .syncFlash, .unison, .twinkle, .sparkle, .constellation]
+            [
+                .blackout, .allOn, .syncFlash,
+                .unison, .twinkle, .sparkle, .constellation,
+                .shimmer, .glow, .fireflies, .alternate, .build, .drop
+            ]
         )
     }
 
     func testEffectProtocolNamesMatchAudienceWebApp() {
         XCTAssertEqual(CrowdAction.unison.effectName, "unison")
+        XCTAssertEqual(CrowdAction.shimmer.effectName, "shimmer")
         XCTAssertEqual(CrowdAction.twinkle.effectName, "twinkle")
         XCTAssertEqual(CrowdAction.sparkle.effectName, "sparkle")
+        XCTAssertEqual(CrowdAction.glow.effectName, "glow")
+        XCTAssertEqual(CrowdAction.fireflies.effectName, "fireflies")
+        XCTAssertEqual(CrowdAction.alternate.effectName, "alternate")
         XCTAssertEqual(CrowdAction.constellation.effectName, "constellation")
+        XCTAssertEqual(CrowdAction.build.effectName, "build")
+        XCTAssertEqual(CrowdAction.drop.effectName, "drop")
         XCTAssertNil(CrowdAction.blackout.effectName)
         XCTAssertNil(CrowdAction.syncFlash.effectName)
     }
@@ -29,6 +39,7 @@ final class CrowdLightBridgeTests: XCTestCase {
         XCTAssertEqual(CueMapping.noteName(24), "C1")
         XCTAssertEqual(CueMapping.noteName(25), "C#1")
         XCTAssertEqual(CueMapping.noteName(30), "F#1")
+        XCTAssertEqual(CueMapping.noteName(36), "C2")
     }
 
     func testMIDIParserHandlesMultipleMessagesAndVelocityZero() {
