@@ -298,7 +298,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.7 • Twinkle/Sparkle/Constellation effects</div>
+  <div class="footer">CrowdLight prototype v0.7.1 • master control hotfix</div>
 </div>
 
 <script type="module">
@@ -400,6 +400,26 @@ function effectShouldFlash(effect,tickIndex){
   if(effect==='constellation') return (Math.abs(clientSeed)%4) === (((tickIndex%4)+4)%4);
   return true;
 }
+
+window.addEventListener('error', e=>{
+  if(IS_MASTER){
+    const el=$('#commandResult');
+    if(el){
+      el.textContent='Controller error: '+(e.message||'Unknown JavaScript error');
+      el.className='commandResult bad';
+    }
+  }
+});
+window.addEventListener('unhandledrejection', e=>{
+  if(IS_MASTER){
+    const el=$('#commandResult');
+    if(el){
+      const msg=e.reason?.message || String(e.reason||'Unknown error');
+      el.textContent='Controller error: '+msg;
+      el.className='commandResult bad';
+    }
+  }
+});
 
 function setupRole(){
   $('#audienceView').classList.toggle('hidden', IS_MASTER);
@@ -891,7 +911,7 @@ function setMasterState(state,title,detail,icon){
   $('#masterStateDetail').textContent=detail;
   $('#masterStateIcon').textContent=icon || '●';
 
-  $('.opBtn').forEach(b=>b.classList.remove('active'));
+  $$('.opBtn').forEach(b=>b.classList.remove('active'));
   if(state==='off') $('#blackoutBtn')?.classList.add('active');
   if(state==='on') $('#allOnBtn')?.classList.add('active');
   if(state==='pattern') $('#startBpmBtn')?.classList.add('active');
@@ -1027,7 +1047,7 @@ function effectDescription(effect){
 function setEffect(effect){
   if(!['unison','twinkle','sparkle','constellation'].includes(effect)) effect='unison';
   selectedEffect=effect;
-  $('#effectGrid .effectBtn').forEach(b=>b.classList.toggle('active',b.dataset.effect===effect));
+  $$('#effectGrid .effectBtn').forEach(b=>b.classList.toggle('active',b.dataset.effect===effect));
   $('#effectText').textContent=effectLabel(effect);
 
   // If an effect is already running, switch texture while preserving the musical mode.
@@ -1039,7 +1059,7 @@ function setEffect(effect){
 }
 function setDivision(d){
   division=+d;
-  $$('#divisionSeg button').forEach(b=>b.classList.toggle('active',+b.dataset.div===division));
+  $$$('#divisionSeg button').forEach(b=>b.classList.toggle('active',+b.dataset.div===division));
   $('#divisionText').textContent=division===1?'1 beat':division+' beats';
 }
 function tapTempo(){
@@ -1095,8 +1115,8 @@ function initMaster(){
   $('#bpmRange').oninput=updateRhythmReadouts;
   $('#flashMsRange').oninput=updateRhythmReadouts;
   $('#sensitivityRange').oninput=()=>$('#sensitivityText').textContent=$('#sensitivityRange').value+'%';
-  $('#divisionSeg button').forEach(b=>b.onclick=()=>setDivision(b.dataset.div));
-  $('#effectGrid .effectBtn').forEach(b=>b.onclick=()=>setEffect(b.dataset.effect));
+  $$('#divisionSeg button').forEach(b=>b.onclick=()=>setDivision(b.dataset.div));
+  $$('#effectGrid .effectBtn').forEach(b=>b.onclick=()=>setEffect(b.dataset.effect));
   $('#listenBtn').onclick=toggleListening;
   $('#musicSyncBtn').onclick=()=>{
     if(musicSyncRunning){
