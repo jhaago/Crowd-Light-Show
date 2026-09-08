@@ -298,12 +298,12 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.7.2 • reliability hardening</div>
+  <div class="footer">CrowdLight prototype v0.7.3 • server clock fix</div>
 </div>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
-import { getDatabase, ref as dbRef, set as dbSet, onValue as dbOnValue, get as dbGet } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
+import { getDatabase, ref as dbRef, set as dbSet, onValue as dbOnValue } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
 
 (() => {
 'use strict';
@@ -668,10 +668,43 @@ async function watchFirebaseInfo(){
 async function getServerOffset(){
   if(TEST_MODE){ serverOffset=0; return 0; }
   if(!dbUrl){ serverOffset=0; return 0; }
+
   try{
     if(!await ensureFirebase()) return 0;
-    const snap=await dbGet(dbRef(firebaseDb,'.info/serverTimeOffset'));
-    serverOffset=Number(snap.val())||0;
+
+    // Firebase documents .info/serverTimeOffset as a realtime .info listener.
+    // Use a one-shot onValue subscription rather than get(), which can reject
+    // this special path in some browser/SDK combinations.
+    const offset = await new Promise((resolve,reject)=>{
+      let settled=false;
+      let unsub=()=>{};
+      const timer=setTimeout(()=>{
+        if(settled) return;
+        settled=true;
+        try{unsub()}catch(e){}
+        reject(new Error('Server clock request timed out'));
+      },4000);
+
+      unsub=dbOnValue(
+        dbRef(firebaseDb,'.info/serverTimeOffset'),
+        snap=>{
+          if(settled) return;
+          settled=true;
+          clearTimeout(timer);
+          try{unsub()}catch(e){}
+          resolve(Number(snap.val())||0);
+        },
+        err=>{
+          if(settled) return;
+          settled=true;
+          clearTimeout(timer);
+          try{unsub()}catch(e){}
+          reject(err);
+        }
+      );
+    });
+
+    serverOffset=Number(offset)||0;
     if(IS_MASTER){
       $('#offsetDot').className='dot good';
       $('#offsetState').textContent=(serverOffset>=0?'+':'')+Math.round(serverOffset)+' ms';
