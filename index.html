@@ -187,7 +187,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
             <button class="dangerBtn wide blackout opBtn active" id="blackoutBtn" data-op="off">BLACKOUT</button>
           </div>
           <div class="commandResult" id="commandResult">Ready for a command.</div>
-          <div class="warning">Rapid strobe is intentionally disabled. CrowdLight limits sustained flashing to 2 flashes per second to reduce photosensitive-seizure risk.</div>
+          <div class="warning">SHIMMER can look rapid across the crowd by staggering phone groups. Each individual phone still has a 2 flashes/second safety ceiling.</div>
         </section>
 
         <section class="card">
@@ -218,9 +218,15 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
             <div class="controlHead"><span>Crowd effect</span><span class="value" id="effectText">Unison</span></div>
             <div class="effectGrid" id="effectGrid">
               <button class="effectBtn active" data-effect="unison"><b>UNISON</b><span>Everyone flashes together</span></button>
+              <button class="effectBtn" data-effect="shimmer"><b>SHIMMER</b><span>Rapid-looking staggered crowd twinkle</span></button>
               <button class="effectBtn" data-effect="twinkle"><b>TWINKLE</b><span>Random stars, locked to the beat</span></button>
               <button class="effectBtn" data-effect="sparkle"><b>SPARKLE</b><span>Sparser, shorter star flashes</span></button>
+              <button class="effectBtn" data-effect="glow"><b>GLOW</b><span>Long synchronized ON / OFF holds</span></button>
+              <button class="effectBtn" data-effect="fireflies"><b>FIREFLIES</b><span>Sparse phones glow for longer</span></button>
+              <button class="effectBtn" data-effect="alternate"><b>ALTERNATE</b><span>Two crowd halves swap ON and OFF</span></button>
               <button class="effectBtn" data-effect="constellation"><b>CONSTELLATION</b><span>Four invisible groups rotate by beat</span></button>
+              <button class="effectBtn" data-effect="build"><b>BUILD</b><span>More phones join across eight beats</span></button>
+              <button class="effectBtn" data-effect="drop"><b>DROP</b><span>Dark beats followed by a big crowd hit</span></button>
             </div>
           </div>
 
@@ -298,7 +304,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.8.1 • ordered fail-safe protocol</div>
+  <div class="footer">CrowdLight prototype v0.9.0 • expanded crowd effects</div>
 </div>
 
 <script type="module">
@@ -424,10 +430,19 @@ function hash32(a,b){
 function seeded01(seed,index){
   return hash32(seed,index)/4294967296;
 }
+const EFFECTS=['unison','shimmer','twinkle','sparkle','glow','fireflies','alternate','constellation','build','drop'];
+
 function effectShouldFlash(effect,tickIndex){
   if(effect==='twinkle') return seeded01(clientSeed,tickIndex) < 0.46;
   if(effect==='sparkle') return seeded01(clientSeed ^ 0xa53c9e71,tickIndex) < 0.22;
   if(effect==='constellation') return (Math.abs(clientSeed)%4) === (((tickIndex%4)+4)%4);
+  if(effect==='build'){
+    const step=((tickIndex%8)+8)%8;
+    const cycle=Math.floor(tickIndex/8);
+    const rank=seeded01(clientSeed ^ 0x61c88647,cycle);
+    return rank < (step+1)/8;
+  }
+  if(effect==='drop') return (((tickIndex%4)+4)%4)===3;
   return true;
 }
 
@@ -1104,7 +1119,7 @@ function validateCommand(cmd){
     if(!Number.isFinite(bpm) || bpm<30 || bpm>240) return {ok:false,reason:'Invalid BPM'};
     if(![1,2,4].includes(div)) return {ok:false,reason:'Invalid beat division'};
     if(!Number.isFinite(phase)) return {ok:false,reason:'Invalid pattern phase'};
-    if(!['unison','twinkle','sparkle','constellation'].includes(cmd.effect)) return {ok:false,reason:'Invalid effect'};
+    if(!EFFECTS.includes(cmd.effect)) return {ok:false,reason:'Invalid effect'};
     const flashMs=Number(cmd.flashMs);
     if(!Number.isFinite(flashMs) || flashMs<35 || flashMs>250) return {ok:false,reason:'Invalid flash duration'};
   }
@@ -1219,15 +1234,110 @@ function executeCommand(cmd){
   if(cmd.mode==='pattern'){
     const bpm=Number(cmd.bpm);
     const div=Number(cmd.division);
-    // Keep the true musical grid. The global physical ON limiter below skips
-    // flashes when necessary rather than inventing a non-musical 500 ms grid.
-    const period=(60000/bpm)*div;
+    const beatPeriod=60000/bpm;
+    const period=beatPeriod*div;
     const effect=cmd.effect;
     let flashMs=Math.min(250,Math.max(35,Number(cmd.flashMs)));
     if(effect==='sparkle') flashMs=Math.min(flashMs,65);
     if(effect==='twinkle') flashMs=Math.min(flashMs,110);
+    if(effect==='shimmer') flashMs=Math.min(flashMs,80);
     const phase=Number(cmd.phaseStart);
 
+    // Long-state effects use synchronized ON/OFF boundaries rather than short
+    // flash pulses. GLOW holds each state for 2× the selected beat spacing.
+    if(effect==='glow' || effect==='alternate'){
+      const statePeriod=effect==='glow' ? period*2 : period;
+      const group=effect==='alternate' ? (Math.abs(clientSeed)%2) : 0;
+
+      const scheduleState=()=>{
+        if(!commandStillCurrent(token)) return;
+        const now=nowServer();
+        let n=Math.floor((now-phase)/statePeriod);
+        if(!Number.isFinite(n)||n<0)n=0;
+        const boundary=phase+n*statePeriod;
+        const nextBoundary=boundary+statePeriod;
+        const wantOn=effect==='glow'
+          ? (n%2===0)
+          : (((n%2)+2)%2)===group;
+
+        setTorch(wantOn,{ratePolicy:'delay'}).catch(()=>{});
+
+        patternTimer=setTimeout(()=>{
+          if(!commandStillCurrent(token)) return;
+          scheduleState();
+        },Math.max(0,nextBoundary-now));
+      };
+
+      const initialDelay=Math.max(0,phase-nowServer());
+      patternTimer=setTimeout(scheduleState,initialDelay);
+      return;
+    }
+
+    // FIREFLIES are deliberately sparse and hold selected phones ON for much
+    // longer than a normal flash. Selection and hold time are deterministic so
+    // reconnecting phones rejoin the same effect rather than inventing a new one.
+    if(effect==='fireflies'){
+      const slotPeriod=Math.max(beatPeriod*div,500);
+      const scheduleFirefly=()=>{
+        if(!commandStillCurrent(token)) return;
+        const now=nowServer();
+        let n=Math.ceil((now-phase)/slotPeriod);
+        if(!Number.isFinite(n)||n<0)n=0;
+        const target=phase+n*slotPeriod;
+
+        patternTimer=setTimeout(async()=>{
+          if(!commandStillCurrent(token)) return;
+
+          const chosen=seeded01(clientSeed ^ 0x3c6ef372,n) < 0.18;
+          if(chosen){
+            const holdMs=700 + Math.round(seeded01(clientSeed ^ 0xbb67ae85,n)*700);
+            const onOk=await setTorch(true,{ratePolicy:'drop'});
+            if(onOk && commandStillCurrent(token)){
+              await sleep(holdMs);
+              if(commandStillCurrent(token)) await setTorch(false);
+            }
+          }
+
+          if(!commandStillCurrent(token)) return;
+          scheduleFirefly();
+        },Math.max(0,target-now));
+      };
+      scheduleFirefly();
+      return;
+    }
+
+    // SHIMMER subdivides every beat into four crowd slots and spreads phones
+    // across eight (or more) deterministic groups. The crowd therefore appears
+    // to sparkle rapidly while each individual phone remains comfortably below
+    // the global physical flash-rate ceiling.
+    if(effect==='shimmer'){
+      const stepPeriod=beatPeriod/4;
+      const groupCount=8*div;
+      const group=Math.abs(clientSeed)%groupCount;
+
+      const scheduleShimmer=()=>{
+        if(!commandStillCurrent(token)) return;
+        const now=nowServer();
+        let n=Math.ceil((now-phase)/stepPeriod);
+        if(!Number.isFinite(n)||n<0)n=0;
+        const target=phase+n*stepPeriod;
+
+        patternTimer=setTimeout(async()=>{
+          if(!commandStillCurrent(token)) return;
+          if((((n%groupCount)+groupCount)%groupCount)===group){
+            await flashTorch(flashMs,()=>commandStillCurrent(token));
+          }
+          if(!commandStillCurrent(token)) return;
+          scheduleShimmer();
+        },Math.max(0,target-now));
+      };
+      scheduleShimmer();
+      return;
+    }
+
+    // Standard beat-grid pulse effects. The final physical ON transition inside
+    // flashTorch enforces the per-phone 2 Hz ceiling. Faster musical grids skip
+    // individual flashes rather than drifting away from the beat.
     const scheduleNext=()=>{
       if(!commandStillCurrent(token)) return;
       const now=nowServer();
@@ -1240,9 +1350,6 @@ function executeCommand(cmd){
         if(!commandStillCurrent(token)) return;
 
         if(effectShouldFlash(effect,n)){
-          // flashTorch's final ON transition enforces the global 2 Hz ceiling.
-          // If a beat is too close to the previous physical flash, that beat is
-          // skipped rather than delayed off the musical grid.
           await flashTorch(flashMs,()=>commandStillCurrent(token));
         }
 
@@ -1540,16 +1647,33 @@ async function masterPattern(phaseWall=0,bpmOverride=0,phaseServerOverride=0){
   }
 }
 function effectLabel(effect){
-  return ({unison:'Unison',twinkle:'Twinkle',sparkle:'Sparkle',constellation:'Constellation'})[effect] || 'Unison';
+  return ({
+    unison:'Unison',
+    shimmer:'Shimmer',
+    twinkle:'Twinkle',
+    sparkle:'Sparkle',
+    glow:'Glow',
+    fireflies:'Fireflies',
+    alternate:'Alternate',
+    constellation:'Constellation',
+    build:'Build',
+    drop:'Drop'
+  })[effect] || 'Unison';
 }
 function effectDescription(effect){
+  if(effect==='shimmer') return 'Rapid-looking staggered sparkle across many phone groups';
   if(effect==='twinkle') return 'Random star flashes on the musical grid';
   if(effect==='sparkle') return 'Sparse short star flashes on the musical grid';
+  if(effect==='glow') return 'Long synchronized ON/OFF holds';
+  if(effect==='fireflies') return 'Sparse phones glow for longer at different times';
+  if(effect==='alternate') return 'Two invisible crowd halves swap ON and OFF';
   if(effect==='constellation') return 'Four invisible crowd groups rotate by beat';
+  if(effect==='build') return 'Participation grows from sparse to full across eight beats';
+  if(effect==='drop') return 'Three dark pattern beats followed by one synchronized hit';
   return 'Everyone flashes together';
 }
 function setEffect(effect){
-  if(!['unison','twinkle','sparkle','constellation'].includes(effect)) effect='unison';
+  if(!EFFECTS.includes(effect)) effect='unison';
   selectedEffect=effect;
   $$('#effectGrid .effectBtn').forEach(b=>b.classList.toggle('active',b.dataset.effect===effect));
   $('#effectText').textContent=effectLabel(effect);
