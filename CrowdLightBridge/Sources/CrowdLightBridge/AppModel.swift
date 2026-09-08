@@ -30,6 +30,7 @@ final class AppModel: ObservableObject {
     private var persistentAction: CrowdAction?
     private var restoreWorkItem: DispatchWorkItem?
     private var actionVersion: UInt64 = 0
+    private var hasStarted = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -44,6 +45,11 @@ final class AppModel: ObservableObject {
 
         midi.onNoteOn = { [weak self] note, channel, velocity in
             self?.handleMIDI(note: note, channel: channel, velocity: velocity)
+        }
+        midi.onSourceLost = { [weak self] in
+            guard let self else { return }
+            self.externalCuesEnabled = false
+            self.log("MIDI source lost. External cues were automatically DISARMED.", success: false)
         }
 
         NotificationCenter.default.addObserver(
@@ -61,6 +67,8 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        guard !hasStarted else { return }
+        hasStarted = true
         midi.refreshSources()
         if let crowdSource = midi.sources.first(where: { $0.name.localizedCaseInsensitiveContains("CrowdLight") }) {
             selectMIDISource(crowdSource.id)
