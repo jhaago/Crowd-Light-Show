@@ -250,6 +250,27 @@ async function testAudienceSuccess(browser) {
   assert.ok(fake.toggles.some(x => x.on === false), "Confirmation flash never turned off");
   assert.equal(await page.textContent("#audienceConn"), "TEST");
 
+  // Revision ordering: after a newer BLACKOUT from one controller, an older
+  // command from that SAME controller must be ignored even if delivered later.
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    controllerId: "ordering-controller",
+    revision: 2,
+    id: "ordering-blackout",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(60);
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    controllerId: "ordering-controller",
+    revision: 1,
+    id: "ordering-old-steady",
+    mode: "steady",
+    startAt: Date.now() + 20,
+    validUntil: Date.now() + 1500
+  }));
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "Older controller revision overrode newer BLACKOUT");
+
   // Steady ON and BLACKOUT command handling.
   await page.evaluate(() => window.__crowdlightInjectCommand({
     id: "steady-1",
