@@ -251,14 +251,12 @@ final class MIDIManager: ObservableObject {
                 )
             )
 
-            // CoreMIDI packet payloads are padded to a four-byte boundary.
-            // Advance only when another packet actually exists.
+            // Advance inside the ORIGINAL CoreMIDI list buffer. Using
+            // MIDIPacketNext is correct here because packetPointer points into
+            // that buffer; the old bug called it on a copied MIDIPacket value.
             if packetIndex + 1 < packetCount {
-                let roundedLength = (length + 3) & ~3
-                let nextOffset = dataOffset + roundedLength
-                packetPointer = UnsafeRawPointer(packetPointer)
-                    .advanced(by: nextOffset)
-                    .assumingMemoryBound(to: MIDIPacket.self)
+                let mutablePacket = UnsafeMutablePointer(mutating: packetPointer)
+                packetPointer = UnsafePointer(MIDIPacketNext(mutablePacket))
             }
         }
 
