@@ -45,7 +45,7 @@ struct ContentView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
-                Text("v0.3")
+                Text("v0.4")
                     .font(.caption)
                     .fontWeight(.semibold)
                 Text("macOS 11+")
@@ -185,6 +185,17 @@ struct ContentView: View {
                 }
 
                 HStack(spacing: 10) {
+                    Text("MIDI test")
+                        .frame(width: 95, alignment: .leading)
+                    Button("TEST MIDI PATH") { model.testMIDILoopback() }
+                        .disabled(midi.connectedSourceID == 0)
+                    Text(model.midiLoopbackState)
+                        .font(.caption)
+                        .foregroundColor(model.midiLoopbackState.hasPrefix("PASSED") ? .green : .secondary)
+                    Spacer()
+                }
+
+                HStack(spacing: 10) {
                     Text("Firebase")
                         .frame(width: 95, alignment: .leading)
                     TextField("Database URL", text: $model.databaseURL)
@@ -194,7 +205,7 @@ struct ContentView: View {
                     Button("Test Firebase") { model.testFirebase() }
                 }
 
-                Text("v0.3 uses the current Firebase test-mode database. Authentication will be added after the multi-device functional test.")
+                Text("v0.4 uses the current Firebase test-mode database. TEST MIDI PATH uses an unmapped diagnostic note and does not send a show command.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
