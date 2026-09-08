@@ -30,6 +30,8 @@ final class AppModel: ObservableObject {
     private var persistentAction: CrowdAction?
     private var restoreWorkItem: DispatchWorkItem?
     private var actionVersion: UInt64 = 0
+    private var controllerRevision: UInt64 = 0
+    private let controllerID = "bridge-" + UUID().uuidString
     private var hasStarted = false
 
     init() {
@@ -213,6 +215,8 @@ final class AppModel: ObservableObject {
                 if let previousCommand, let previousAction {
                     var restored = previousCommand
                     restored["id"] = UUID().uuidString
+                    self.controllerRevision &+= 1
+                    restored["revision"] = self.controllerRevision
                     restored["issuedAt"] = self.firebase.estimatedServerNowMs()
                     restored["validUntil"] = self.firebase.estimatedServerNowMs() + 15_000
                     self.persistentCommand = restored
@@ -258,8 +262,12 @@ final class AppModel: ObservableObject {
     }
 
     private func baseCommand(mode: String, ttlMs: Double = 15_000) -> [String: Any] {
+        controllerRevision &+= 1
         let now = firebase.estimatedServerNowMs()
         return [
+            "protocolVersion": 1,
+            "controllerId": controllerID,
+            "revision": controllerRevision,
             "id": UUID().uuidString,
             "mode": mode,
             "room": cleanRoom(room),
@@ -281,6 +289,8 @@ final class AppModel: ObservableObject {
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self, var refreshed = self.persistentCommand else { return }
             refreshed["id"] = UUID().uuidString
+            self.controllerRevision &+= 1
+            refreshed["revision"] = self.controllerRevision
             refreshed["issuedAt"] = self.firebase.estimatedServerNowMs()
             refreshed["validUntil"] = self.firebase.estimatedServerNowMs() + 15_000
             self.persistentCommand = refreshed
