@@ -15,6 +15,10 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("CoreMIDI")
             ]
+        ),
+        .testTarget(
+            name: "CrowdLightBridgeTests",
+            dependencies: ["CrowdLightBridge"]
         )
     ]
 )
