@@ -866,6 +866,8 @@ function commandPath(){
 
 async function pushRemoteCommand(cmd){
   if(TEST_MODE){
+    const delay=Math.max(0,Number(window.__crowdlightTestWriteDelayMs)||0);
+    if(delay) await sleep(delay);
     window.__crowdlightTestCommands = window.__crowdlightTestCommands || [];
     window.__crowdlightTestCommands.push(JSON.parse(JSON.stringify(cmd)));
     firebaseConnected=true;
@@ -1654,6 +1656,20 @@ function registerOnset(now,energy,avg,sd){
       masterPattern(now,bpm);
     }
   }
+}
+
+// Test-only state inspection. This is inert unless ?test=1 is explicitly
+// present and is never included in generated audience links.
+if(TEST_MODE){
+  window.__crowdlightTestState=()=>({
+    audienceCommandVersion,
+    audienceSessionVersion,
+    activeAudienceCommand: activeAudienceCommand ? JSON.parse(JSON.stringify(activeAudienceCommand)) : null,
+    desiredTorchOn,
+    torchOn,
+    currentMasterCommand: currentMasterCommand ? JSON.parse(JSON.stringify(currentMasterCommand)) : null,
+    masterActionVersion
+  });
 }
 
 // Start
