@@ -6,7 +6,7 @@ The Swift source lives in the `CrowdLightBridge/` directory. GitHub Actions runs
 
 ## Current prototype
 
-Version: **0.3**
+Version: **0.4**
 
 - macOS 11+
 - Apple Silicon (arm64) + Intel (x86_64)
@@ -22,6 +22,7 @@ Version: **0.3**
 - external MIDI cues start disabled every launch
 - manual BLACKOUT remains available
 - SEND TEST CUE buttons deliberately write to the configured CrowdLight room
+- TEST MIDI PATH sends unmapped Note 127 through the matching IAC destination and verifies it returns through the selected CoreMIDI input without sending a Firebase show command
 
 Firebase authentication is intentionally not implemented yet while the project remains in controlled prototype testing. Do not use the current open/test-mode configuration for a public event.
 
