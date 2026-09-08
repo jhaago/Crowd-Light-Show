@@ -286,14 +286,17 @@ final class AppModel: ObservableObject {
 
     private func startKeepAliveTimer() {
         keepAliveTimer?.invalidate()
-        keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+
+        let timer = Timer(timeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self, var refreshed = self.persistentCommand else { return }
             refreshed["id"] = UUID().uuidString
             self.controllerRevision &+= 1
-            refreshed["revision"] = self.controllerRevision
+            let revision = self.controllerRevision
+            refreshed["revision"] = revision
             refreshed["issuedAt"] = self.firebase.estimatedServerNowMs()
             refreshed["validUntil"] = self.firebase.estimatedServerNowMs() + 15_000
             self.persistentCommand = refreshed
+
             self.firebase.sendCommand(
                 databaseURL: self.databaseURL,
                 room: self.room,
@@ -301,6 +304,9 @@ final class AppModel: ObservableObject {
             ) { result in
                 if case .failure(let error) = result {
                     DispatchQueue.main.async {
+                        // Do not let a superseded heartbeat completion change
+                        // the visible status of a newer operator action.
+                        guard revision == self.controllerRevision else { return }
                         self.firebaseConnected = false
                         self.firebaseState = "Write failed"
                         self.log("Keepalive write failed: \(error.localizedDescription)", success: false)
@@ -308,6 +314,9 @@ final class AppModel: ObservableObject {
                 }
             }
         }
+
+        keepAliveTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func displayState(for action: CrowdAction, command: [String: Any]) -> String {
@@ -341,9 +350,21 @@ final class AppModel: ObservableObject {
     }
 
     private func sendCommand(_ command: [String: Any], description: String, source: String) {
+        let revision = (command["revision"] as? NSNumber)?.uint64Value
+            ?? (command["revision"] as? UInt64)
+            ?? 0
+
         firebase.sendCommand(databaseURL: databaseURL, room: room, command: command) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self else { return }
+
+                // A newer cue has already been created. The transport will
+                // repair stale REST ordering; this older completion must not
+                // overwrite the operator-facing state.
+                if revision > 0, revision < self.controllerRevision {
+                    return
+                }
+
                 switch result {
                 case .success:
                     self.firebaseConnected = true
