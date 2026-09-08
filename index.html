@@ -235,7 +235,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
             <div class="statusLine"><span class="dot good"></span>Local tab testing<small>ACTIVE</small></div>
             <div class="statusLine"><span class="dot" id="offsetDot"></span>Server clock<small id="offsetState">LOCAL</small></div>
           </div>
-          <div class="note">For this prototype, the database can be left blank and tested in two tabs on the same device/browser. Cross-phone sync needs your Firebase Realtime Database URL.</div>
+          <div class="note">Firebase is built into this version. Separate phones can now receive the same live show commands over the internet.</div>
         </section>
 
         <section class="card">
@@ -246,13 +246,13 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
         <section class="card">
           <div class="sectionHead"><div><h2>Audience link</h2><div class="sub">Use this URL for your event QR code</div></div></div>
           <div class="field"><input id="audienceLink" readonly></div>
-          <div class="note">Built-in QR generation is the next step; this version gives you the exact audience URL to encode.</div>
+          <div class="note">This is the audience URL to use for the event QR code. Built-in QR display is coming next.</div>
         </section>
       </div>
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.1 • Flashlight only</div>
+  <div class="footer">CrowdLight prototype v0.2 • Firebase connected • Flashlight only</div>
 </div>
 
 <script>
@@ -264,7 +264,8 @@ const $$ = s => [...document.querySelectorAll(s)];
 const qs = new URLSearchParams(location.search);
 const IS_MASTER = qs.get('master') === '1' || location.hash === '#master';
 const DEFAULT_ROOM = (qs.get('room') || localStorage.getItem('crowdlight_room') || 'MAIN').toUpperCase().replace(/[^A-Z0-9_-]/g,'').slice(0,24) || 'MAIN';
-const DEFAULT_DB = qs.get('db') || localStorage.getItem('crowdlight_db') || '';
+const BUILT_IN_DB = 'https://crowd-light-show-default-rtdb.asia-southeast1.firebasedatabase.app';
+const DEFAULT_DB = qs.get('db') || localStorage.getItem('crowdlight_db') || BUILT_IN_DB;
 const MAX_FLASH_HZ = 2;
 const COMMAND_TTL = 15000;
 const REFRESH_MS = 5000;
@@ -616,7 +617,7 @@ function buildAudienceUrl(){
   u.searchParams.delete('master');
   u.hash='';
   u.searchParams.set('room',room);
-  if(dbUrl)u.searchParams.set('db',dbUrl); else u.searchParams.delete('db');
+  u.searchParams.delete('db');
   return u.href;
 }
 function refreshAudienceLink(){
