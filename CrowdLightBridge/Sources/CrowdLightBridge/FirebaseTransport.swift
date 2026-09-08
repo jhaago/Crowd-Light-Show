@@ -56,7 +56,7 @@ final class FirebaseTransport {
                 let payload: [String: Any] = [
                     "online": true,
                     "source": "CrowdLight Bridge",
-                    "version": "0.2.0",
+                    "version": "0.3.0",
                     "lastSeen": self.estimatedServerNowMs()
                 ]
 
