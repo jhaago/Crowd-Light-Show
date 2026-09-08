@@ -46,13 +46,14 @@ async function lastCommand(page) {
 }
 
 async function testMaster(browser) {
-  const page = await browser.newPage();
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await stubFirebase(page);
   const errors = [];
   page.on("pageerror", e => errors.push(e.message));
 
   await page.goto(base + "?master=1&test=1", { waitUntil: "networkidle" });
   await page.waitForSelector("#masterView:not(.hidden)");
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "Master page overflows horizontally on a phone viewport");
 
   await page.click("#allOnBtn");
   await waitForCommand(page, cmd => cmd && cmd.mode === "steady");
@@ -122,7 +123,7 @@ async function testMaster(browser) {
 }
 
 async function makeAudiencePage(browser, torchSupported = true) {
-  const page = await browser.newPage();
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await stubFirebase(page);
 
   await page.addInitScript(supported => {
@@ -194,6 +195,7 @@ async function testAudienceSuccess(browser) {
   await page.goto(base + "?test=1", { waitUntil: "networkidle" });
   await page.click("#joinBtn");
   await page.waitForSelector("#readyCard:not(.hidden)", { timeout: 3000 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "Audience page overflows horizontally on a phone viewport");
 
   let fake = await page.evaluate(() => window.__fakeTorch);
   assert.equal(fake.on, false);
@@ -244,6 +246,51 @@ async function testAudienceSuccess(browser) {
   fake = await page.evaluate(() => window.__fakeTorch);
   assert.equal(fake.on, false);
   assert.ok(fake.toggles.length >= before + 2, "Scheduled flash did not toggle on/off");
+
+  // If a persistent command stops being refreshed, the phone must fail safe OFF.
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "expiring-steady",
+    mode: "steady",
+    startAt: Date.now() + 20,
+    validUntil: Date.now() + 220
+  }));
+  await page.waitForTimeout(80);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true);
+  await page.waitForTimeout(360);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "Expired steady command did not fail safe OFF");
+
+  // Sustained patterns are hard-limited to at most 2 flashes per second,
+  // even if a much faster BPM is requested.
+  const patternStartIndex = await page.evaluate(() => window.__fakeTorch.toggles.length);
+  await page.evaluate(() => {
+    const now = Date.now();
+    window.__crowdlightInjectCommand({
+      id: "rate-limit-pattern",
+      mode: "pattern",
+      bpm: 240,
+      division: 1,
+      effect: "unison",
+      flashMs: 45,
+      phaseStart: now + 40,
+      startAt: now + 40,
+      validUntil: now + 1700
+    });
+  });
+  await page.waitForTimeout(1220);
+  const patternOnTimes = await page.evaluate(start => (
+    window.__fakeTorch.toggles.slice(start).filter(x => x.on).map(x => x.at)
+  ), patternStartIndex);
+  assert.ok(patternOnTimes.length >= 2, "Pattern safety test did not produce enough flashes");
+  for (let i = 1; i < patternOnTimes.length; i++) {
+    assert.ok(patternOnTimes[i] - patternOnTimes[i - 1] >= 430, "Pattern exceeded the 2 flashes/sec safety ceiling");
+  }
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-rate-test",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(50);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false);
 
   await page.click("#leaveBtn");
   await page.waitForSelector("#joinCard:not(.hidden)");
