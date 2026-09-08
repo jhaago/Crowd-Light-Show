@@ -82,6 +82,13 @@ p{color:var(--muted);line-height:1.55;margin:0}
 .opBtn.sent:after{content:"SENT";position:absolute;right:9px;top:8px;font-size:9px;font-weight:950;letter-spacing:.7px;padding:3px 6px;border-radius:99px;background:rgba(255,255,255,.18);color:inherit}
 .commandResult{margin-top:10px;min-height:20px;text-align:center;font-size:12px;font-weight:800;color:var(--muted)}
 .commandResult.ok{color:var(--good)}.commandResult.bad{color:var(--danger)}
+.effectGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:10px}
+.effectBtn{min-height:58px;border:1px solid var(--line);border-radius:14px;background:#0a0f17;color:#9dacbf;text-align:left;padding:10px 12px;font-weight:850;cursor:pointer}
+.effectBtn b{display:block;color:#eef3ff;font-size:13px;margin-bottom:3px}
+.effectBtn span{display:block;font-size:10px;font-weight:650;line-height:1.25;color:#7f8da2}
+.effectBtn.active{border-color:#6f91cf;background:#18243a;box-shadow:inset 0 0 0 1px rgba(169,195,255,.22),0 7px 22px rgba(124,168,255,.12)}
+.effectBtn.active b{color:#fff}
+@media(max-width:460px){.effectGrid{grid-template-columns:1fr 1fr}.effectBtn{min-height:64px;padding:9px 10px}}
 .control{margin-top:17px}
 .controlHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:13px;color:#cdd6e5;font-weight:780}
 .value{font-variant-numeric:tabular-nums;color:white}
@@ -207,6 +214,16 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
             </div>
           </div>
 
+          <div class="control">
+            <div class="controlHead"><span>Crowd effect</span><span class="value" id="effectText">Unison</span></div>
+            <div class="effectGrid" id="effectGrid">
+              <button class="effectBtn active" data-effect="unison"><b>UNISON</b><span>Everyone flashes together</span></button>
+              <button class="effectBtn" data-effect="twinkle"><b>TWINKLE</b><span>Random stars, locked to the beat</span></button>
+              <button class="effectBtn" data-effect="sparkle"><b>SPARKLE</b><span>Sparser, shorter star flashes</span></button>
+              <button class="effectBtn" data-effect="constellation"><b>CONSTELLATION</b><span>Four invisible groups rotate by beat</span></button>
+            </div>
+          </div>
+
           <div class="actions">
             <button class="secondary" id="tapBtn">TAP TEMPO</button>
             <button class="primary opBtn" id="startBpmBtn" data-op="pattern">START BPM FLASHING</button>
@@ -281,7 +298,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.6 • improved master console • blackout fix</div>
+  <div class="footer">CrowdLight prototype v0.7 • Twinkle/Sparkle/Constellation effects</div>
 </div>
 
 <script type="module">
@@ -323,8 +340,19 @@ let lastCommandId = '';
 let currentMasterCommand = null;
 let keepAliveTimer = null;
 let division = 1;
+let selectedEffect = 'unison';
 let taps = [];
 let masterPhaseWall = 0;
+
+let clientSeed = Number(localStorage.getItem('crowdlight_client_seed')) || 0;
+if(!clientSeed){
+  try{
+    const a=new Uint32Array(1); crypto.getRandomValues(a); clientSeed=a[0] || 1;
+  }catch(e){
+    clientSeed=Math.floor(Math.random()*0xffffffff) || 1;
+  }
+  localStorage.setItem('crowdlight_client_seed',String(clientSeed));
+}
 
 // Music
 let audioCtx = null, micStream = null, analyser = null, audioRAF = 0;
@@ -355,6 +383,23 @@ function log(msg){
   c.textContent = `[${t}] ${msg}\n` + c.textContent;
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+function hash32(a,b){
+  let x=((a>>>0) ^ Math.imul((b+1)>>>0,0x9e3779b1))>>>0;
+  x^=x>>>16; x=Math.imul(x,0x7feb352d)>>>0;
+  x^=x>>>15; x=Math.imul(x,0x846ca68b)>>>0;
+  x^=x>>>16;
+  return x>>>0;
+}
+function seeded01(seed,index){
+  return hash32(seed,index)/4294967296;
+}
+function effectShouldFlash(effect,tickIndex){
+  if(effect==='twinkle') return seeded01(clientSeed,tickIndex) < 0.46;
+  if(effect==='sparkle') return seeded01(clientSeed ^ 0xa53c9e71,tickIndex) < 0.22;
+  if(effect==='constellation') return (Math.abs(clientSeed)%4) === (((tickIndex%4)+4)%4);
+  return true;
+}
 
 function setupRole(){
   $('#audienceView').classList.toggle('hidden', IS_MASTER);
@@ -726,16 +771,23 @@ async function executeCommand(cmd){
     const div=Math.max(1,Number(cmd.division)||1);
     const rawPeriod=(60000/bpm)*div;
     const period=Math.max(1000/MAX_FLASH_HZ,rawPeriod);
-    const flashMs=Math.min(250,Math.max(35,Number(cmd.flashMs)||90));
+    const effect=['unison','twinkle','sparkle','constellation'].includes(cmd.effect)?cmd.effect:'unison';
+    let flashMs=Math.min(250,Math.max(35,Number(cmd.flashMs)||90));
+    if(effect==='sparkle') flashMs=Math.min(flashMs,65);
+    if(effect==='twinkle') flashMs=Math.min(flashMs,110);
     const phase=Number(cmd.phaseStart||cmd.startAt||nowServer());
+
     const scheduleNext=()=>{
       const now=nowServer();
       let n=Math.ceil((now-phase)/period);
       if(!Number.isFinite(n)||n<0)n=0;
       const target=phase+n*period;
       const delay=Math.max(0,target-now);
+
       patternTimer=setTimeout(async()=>{
-        await flashTorch(flashMs);
+        if(effectShouldFlash(effect,n)){
+          await flashTorch(flashMs);
+        }
         scheduleNext();
       },delay);
     };
@@ -924,9 +976,9 @@ async function masterFlash(){
       }else if(previous.mode==='pattern'){
         const bpm=Number(previous.bpm)||+$('#bpmRange').value;
         if(previousMusic || musicSyncRunning){
-          setMasterState('music','MUSIC SYNC',`Following detected music at about ${Math.round(bpm)} BPM.`,'♫');
+          setMasterState('music','MUSIC SYNC • '+effectLabel(selectedEffect),`${effectDescription(selectedEffect)} • about ${Math.round(bpm)} BPM.`,'♫');
         }else{
-          setMasterState('pattern','BPM FLASHING',`${Math.round(bpm)} BPM • every ${division===1?'beat':division+' beats'}.`,'↻');
+          setMasterState('pattern',effectLabel(previous.effect||selectedEffect).toUpperCase(),`${effectDescription(previous.effect||selectedEffect)} • ${Math.round(bpm)} BPM.`,'↻');
         }
       }
     }else{
@@ -947,7 +999,7 @@ async function masterPattern(phaseWall=0, bpmOverride=0){
     phaseStart=nowServer()+1200;
   }
   masterPhaseWall=phaseStart-serverOffset;
-  const cmd={...commandBase('pattern'),bpm,division,flashMs,phaseStart,startAt:phaseStart};
+  const cmd={...commandBase('pattern'),bpm,division,flashMs,effect:selectedEffect,phaseStart,startAt:phaseStart};
   $('#masterModeText').textContent=`${bpm.toFixed(0)} BPM • EVERY ${division}`;
 
   if(musicSyncRunning){
@@ -955,13 +1007,35 @@ async function masterPattern(phaseWall=0, bpmOverride=0){
     $('#musicSyncBtn').textContent='STOP MUSIC SYNC';
     $('#startBpmBtn').textContent='START BPM FLASHING';
   }else{
-    setMasterState('pattern','BPM FLASHING',`${Math.round(bpm)} BPM • flash every ${division===1?'beat':division+' beats'}.`,'↻');
+    setMasterState('pattern',effectLabel(selectedEffect).toUpperCase(),`${effectDescription(selectedEffect)} • ${Math.round(bpm)} BPM • every ${division===1?'beat':division+' beats'}.`,'↻');
     $('#startBpmBtn').textContent='STOP BPM FLASHING';
   }
   showCommandResult('Starting synchronized pattern…',true);
   markSent(musicSyncRunning?$('#musicSyncBtn'):$('#startBpmBtn'));
   await publishCommand(cmd,{keep:true});
   showCommandResult(firebaseConnected?'Pattern is live.':'Pattern command sent; Firebase is reconnecting.',firebaseConnected);
+}
+function effectLabel(effect){
+  return ({unison:'Unison',twinkle:'Twinkle',sparkle:'Sparkle',constellation:'Constellation'})[effect] || 'Unison';
+}
+function effectDescription(effect){
+  if(effect==='twinkle') return 'Random star flashes on the musical grid';
+  if(effect==='sparkle') return 'Sparse short star flashes on the musical grid';
+  if(effect==='constellation') return 'Four invisible crowd groups rotate by beat';
+  return 'Everyone flashes together';
+}
+function setEffect(effect){
+  if(!['unison','twinkle','sparkle','constellation'].includes(effect)) effect='unison';
+  selectedEffect=effect;
+  $('#effectGrid .effectBtn').forEach(b=>b.classList.toggle('active',b.dataset.effect===effect));
+  $('#effectText').textContent=effectLabel(effect);
+
+  // If an effect is already running, switch texture while preserving the musical mode.
+  if(currentMasterCommand?.mode==='pattern'){
+    const bpm=Number(currentMasterCommand.bpm)||+$('#bpmRange').value;
+    const phaseWall=musicSyncRunning && lastOnset ? lastOnset : Date.now();
+    masterPattern(phaseWall,bpm);
+  }
 }
 function setDivision(d){
   division=+d;
@@ -1021,7 +1095,8 @@ function initMaster(){
   $('#bpmRange').oninput=updateRhythmReadouts;
   $('#flashMsRange').oninput=updateRhythmReadouts;
   $('#sensitivityRange').oninput=()=>$('#sensitivityText').textContent=$('#sensitivityRange').value+'%';
-  $$('#divisionSeg button').forEach(b=>b.onclick=()=>setDivision(b.dataset.div));
+  $('#divisionSeg button').forEach(b=>b.onclick=()=>setDivision(b.dataset.div));
+  $('#effectGrid .effectBtn').forEach(b=>b.onclick=()=>setEffect(b.dataset.effect));
   $('#listenBtn').onclick=toggleListening;
   $('#musicSyncBtn').onclick=()=>{
     if(musicSyncRunning){
@@ -1034,7 +1109,7 @@ function initMaster(){
       const bpm=60000/detectedPeriod;
       masterPattern(lastOnset || Date.now(),bpm);
     }else{
-      setMasterState('music','MUSIC SYNC ARMED','Listening for a stable beat before flashing begins.','♫');
+      setMasterState('music','MUSIC SYNC ARMED • '+effectLabel(selectedEffect),'Listening for a stable beat before '+effectLabel(selectedEffect)+' begins.','♫');
       showCommandResult('Music Sync is armed; waiting for a stable beat.',true);
       markSent($('#musicSyncBtn'));
     }
