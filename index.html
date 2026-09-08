@@ -252,7 +252,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.4 • official Firebase live sync • flashlight only</div>
+  <div class="footer">CrowdLight prototype v0.5 • strict torch verification • Firebase live sync</div>
 </div>
 
 <script type="module">
@@ -358,26 +358,12 @@ async function requestTorch(){
   async function candidateHasTorch(s){
     const t=s?.getVideoTracks?.()[0];
     if(!t) return false;
+
+    // Do NOT infer torch support merely because applyConstraints() resolves:
+    // browsers may silently ignore unsupported constraints.
     let caps={};
     try{ caps=t.getCapabilities ? t.getCapabilities() : {}; }catch(e){}
-    if(caps && caps.torch === true) return true;
-
-    // Some Chromium builds accept the torch constraint even when it is omitted
-    // from getCapabilities(), so probe it briefly.
-    try{
-      await t.applyConstraints({advanced:[{torch:true}]});
-      await sleep(80);
-      await t.applyConstraints({advanced:[{torch:false}]});
-      return true;
-    }catch(e){
-      try{
-        await t.applyConstraints({torch:true});
-        await sleep(80);
-        await t.applyConstraints({torch:false});
-        return true;
-      }catch(e2){}
-    }
-    return false;
+    return caps?.torch === true;
   }
 
   async function adoptCandidate(s){
@@ -441,18 +427,35 @@ async function requestTorch(){
   }
 
   torchAvailable=false;
-  throw new Error('I tested '+Math.max(tried,1)+' camera input'+(tried===1?'':'s')+' on this phone, but none exposed flashlight control to the browser.');
+  const isSamsungInternet=/SamsungBrowser/i.test(navigator.userAgent||'');
+  const browserHint=isSamsungInternet
+    ? '\n\nThis appears to be Samsung Internet. Please open the same CrowdLight link directly in Google Chrome and try again.'
+    : '\n\nTry opening the link directly in the latest Google Chrome rather than an in-app browser.';
+  throw new Error('I tested '+Math.max(tried,1)+' camera input'+(tried===1?'':'s')+' on this phone, but none explicitly reported flashlight support.'+browserHint);
 }
 async function setTorch(on){
   if(!track || track.readyState !== 'live') return false;
   on = !!on;
   if(torchOn === on) return true;
+
   try{
     await track.applyConstraints({advanced:[{torch:on}]});
   }catch(e1){
-    try{ await track.applyConstraints({torch:on}); }
-    catch(e2){ return false; }
+    try{
+      await track.applyConstraints({torch:on});
+    }catch(e2){
+      return false;
+    }
   }
+
+  // If the browser exposes actual torch state, require it to match.
+  try{
+    const settings=track.getSettings ? track.getSettings() : {};
+    if(Object.prototype.hasOwnProperty.call(settings,'torch') && settings.torch !== on){
+      return false;
+    }
+  }catch(e){}
+
   torchOn = on;
   $('#flashOverlay').classList.toggle('show', on);
   return true;
@@ -736,8 +739,13 @@ function initAudience(){
       $('#readyCard').classList.remove('hidden');
       setNet(dbUrl?'Connecting…':'Local demo',dbUrl?'':'warn');
       connectRemoteAudience();
-      // Confirmation flash
-      await sleep(250); await flashTorch(120);
+      // Confirmation flash. If the browser reports failure here, do not present READY.
+      await sleep(250);
+      const flashOk=await setTorch(true);
+      if(!flashOk) throw new Error('The browser reported torch capability, but did not apply the flashlight setting.');
+      await sleep(160);
+      const offOk=await setTorch(false);
+      if(!offOk) throw new Error('The flashlight test could not be completed reliably.');
     }catch(e){
       $('#torchCheck').className='check bad'; $('#torchCheck').textContent='!'; $('#torchText').textContent='not available';
       b.disabled=false; b.textContent='TRY AGAIN';
