@@ -218,15 +218,20 @@ final class MIDIManager: ObservableObject {
         return result
     }
 
-    fileprivate func handle(packetList: UnsafePointer<MIDIPacketList>) {
+    static func packetPayloads(
+        packetList: UnsafePointer<MIDIPacketList>
+    ) -> [[UInt8]] {
         let packetCount = Int(packetList.pointee.numPackets)
         guard packetCount > 0,
               let packetOffset = MemoryLayout<MIDIPacketList>.offset(of: \MIDIPacketList.packet),
               let dataOffset = MemoryLayout<MIDIPacket>.offset(of: \MIDIPacket.data)
-        else { return }
+        else { return [] }
+
+        var payloads: [[UInt8]] = []
+        payloads.reserveCapacity(packetCount)
 
         // Work directly inside CoreMIDI's original variable-length packet-list
-        // buffer. Do not copy MIDIPacket and then call MIDIPacketNext on the copy.
+        // buffer. Do not copy MIDIPacket and then advance relative to the copy.
         var packetPointer = UnsafeRawPointer(packetList)
             .advanced(by: packetOffset)
             .assumingMemoryBound(to: MIDIPacket.self)
@@ -237,23 +242,17 @@ final class MIDIManager: ObservableObject {
                 .advanced(by: dataOffset)
                 .assumingMemoryBound(to: UInt8.self)
 
-            let bytes = Array(
-                UnsafeBufferPointer(
-                    start: dataPointer,
-                    count: max(0, length)
+            payloads.append(
+                Array(
+                    UnsafeBufferPointer(
+                        start: dataPointer,
+                        count: max(0, length)
+                    )
                 )
             )
 
-            for event in Self.parseNoteOns(bytes: bytes) {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.lastMessage = "Note \(event.note) • Ch \(event.channel) • Vel \(event.velocity)"
-                    self.onNoteOn?(event.note, event.channel, event.velocity)
-                }
-            }
-
-            // MIDIPacketNext is effectively header/data offset plus a 4-byte
-            // rounded payload size. Advance only when another packet exists.
+            // CoreMIDI packet payloads are padded to a four-byte boundary.
+            // Advance only when another packet actually exists.
             if packetIndex + 1 < packetCount {
                 let roundedLength = (length + 3) & ~3
                 let nextOffset = dataOffset + roundedLength
@@ -262,5 +261,20 @@ final class MIDIManager: ObservableObject {
                     .assumingMemoryBound(to: MIDIPacket.self)
             }
         }
+
+        return payloads
     }
+
+    fileprivate func handle(packetList: UnsafePointer<MIDIPacketList>) {
+        for bytes in Self.packetPayloads(packetList: packetList) {
+            for event in Self.parseNoteOns(bytes: bytes) {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.lastMessage = "Note \(event.note) • Ch \(event.channel) • Vel \(event.velocity)"
+                    self.onNoteOn?(event.note, event.channel, event.velocity)
+                }
+            }
+        }
+    }
+
 }
