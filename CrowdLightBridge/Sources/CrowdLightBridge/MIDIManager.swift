@@ -2,6 +2,12 @@ import Foundation
 import CoreMIDI
 import Combine
 
+struct ParsedMIDINoteOn: Equatable {
+    let note: Int
+    let channel: Int
+    let velocity: Int
+}
+
 private func crowdLightMIDIReadProc(
     _ packetList: UnsafePointer<MIDIPacketList>,
     _ readProcRefCon: UnsafeMutableRawPointer?,
@@ -90,7 +96,9 @@ final class MIDIManager: ObservableObject {
             )
         }
 
-        let sorted = discovered.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let sorted = discovered.sorted {
+            $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
         if Thread.isMainThread {
             self.sources = sorted
         } else {
@@ -134,48 +142,125 @@ final class MIDIManager: ObservableObject {
 
     func autoSelectCrowdLightSource() -> Int32? {
         refreshSources()
-        if let source = sources.first(where: { $0.name.localizedCaseInsensitiveContains("CrowdLight") }) {
+        if let source = sources.first(where: {
+            $0.name.localizedCaseInsensitiveContains("CrowdLight")
+        }) {
             connect(to: source.id)
             return source.id
         }
         return nil
     }
 
-    fileprivate func handle(packetList: UnsafePointer<MIDIPacketList>) {
-        var packet = packetList.pointee.packet
+    static func parseNoteOns(bytes: [UInt8]) -> [ParsedMIDINoteOn] {
+        var result: [ParsedMIDINoteOn] = []
+        var index = 0
 
-        for _ in 0..<packetList.pointee.numPackets {
-            let length = Int(packet.length)
-            if length >= 3 {
-                withUnsafeBytes(of: packet.data) { rawBuffer in
-                    let bytes = rawBuffer.bindMemory(to: UInt8.self)
-                    var index = 0
-                    while index + 2 < length {
-                        let status = bytes[index]
-                        let messageType = status & 0xF0
-                        let channel = Int(status & 0x0F) + 1
+        while index < bytes.count {
+            let status = bytes[index]
 
-                        if messageType == 0x90 {
-                            let note = Int(bytes[index + 1])
-                            let velocity = Int(bytes[index + 2])
-                            if velocity > 0 {
-                                DispatchQueue.main.async {
-                                    self.lastMessage = "Note \(note) • Ch \(channel) • Vel \(velocity)"
-                                    self.onNoteOn?(note, channel, velocity)
-                                }
-                            }
-                            index += 3
-                        } else if messageType == 0x80 || messageType == 0xA0 || messageType == 0xB0 || messageType == 0xE0 {
-                            index += 3
-                        } else if messageType == 0xC0 || messageType == 0xD0 {
-                            index += 2
-                        } else {
-                            index += 1
-                        }
+            // CoreMIDI packet data uses complete MIDI messages; running status is
+            // not expected here. Stray data bytes are ignored defensively.
+            if status < 0x80 {
+                index += 1
+                continue
+            }
+
+            // Single-byte realtime messages may be interleaved.
+            if status >= 0xF8 {
+                index += 1
+                continue
+            }
+
+            if status >= 0xF0 {
+                switch status {
+                case 0xF0:
+                    // Skip SysEx through EOX, or to packet end for a fragment.
+                    index += 1
+                    while index < bytes.count && bytes[index] != 0xF7 {
+                        index += 1
                     }
+                    if index < bytes.count { index += 1 }
+                case 0xF1, 0xF3:
+                    index += min(2, bytes.count - index)
+                case 0xF2:
+                    index += min(3, bytes.count - index)
+                default:
+                    index += 1
+                }
+                continue
+            }
+
+            let messageType = status & 0xF0
+            let channel = Int(status & 0x0F) + 1
+            let length = (messageType == 0xC0 || messageType == 0xD0) ? 2 : 3
+
+            guard index + length <= bytes.count else {
+                break
+            }
+
+            if messageType == 0x90 {
+                let note = Int(bytes[index + 1])
+                let velocity = Int(bytes[index + 2])
+                if velocity > 0 {
+                    result.append(
+                        ParsedMIDINoteOn(
+                            note: note,
+                            channel: channel,
+                            velocity: velocity
+                        )
+                    )
                 }
             }
-            packet = MIDIPacketNext(&packet).pointee
+
+            index += length
+        }
+
+        return result
+    }
+
+    fileprivate func handle(packetList: UnsafePointer<MIDIPacketList>) {
+        let packetCount = Int(packetList.pointee.numPackets)
+        guard packetCount > 0,
+              let packetOffset = MemoryLayout<MIDIPacketList>.offset(of: \MIDIPacketList.packet),
+              let dataOffset = MemoryLayout<MIDIPacket>.offset(of: \MIDIPacket.data)
+        else { return }
+
+        // Work directly inside CoreMIDI's original variable-length packet-list
+        // buffer. Do not copy MIDIPacket and then call MIDIPacketNext on the copy.
+        var packetPointer = UnsafeRawPointer(packetList)
+            .advanced(by: packetOffset)
+            .assumingMemoryBound(to: MIDIPacket.self)
+
+        for packetIndex in 0..<packetCount {
+            let length = Int(packetPointer.pointee.length)
+            let dataPointer = UnsafeRawPointer(packetPointer)
+                .advanced(by: dataOffset)
+                .assumingMemoryBound(to: UInt8.self)
+
+            let bytes = Array(
+                UnsafeBufferPointer(
+                    start: dataPointer,
+                    count: max(0, length)
+                )
+            )
+
+            for event in Self.parseNoteOns(bytes: bytes) {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.lastMessage = "Note \(event.note) • Ch \(event.channel) • Vel \(event.velocity)"
+                    self.onNoteOn?(event.note, event.channel, event.velocity)
+                }
+            }
+
+            // MIDIPacketNext is effectively header/data offset plus a 4-byte
+            // rounded payload size. Advance only when another packet exists.
+            if packetIndex + 1 < packetCount {
+                let roundedLength = (length + 3) & ~3
+                let nextOffset = dataOffset + roundedLength
+                packetPointer = UnsafeRawPointer(packetPointer)
+                    .advanced(by: nextOffset)
+                    .assumingMemoryBound(to: MIDIPacket.self)
+            }
         }
     }
 }
