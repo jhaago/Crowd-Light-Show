@@ -1022,15 +1022,26 @@ function clearPattern(){
 }
 
 function failSafeAudienceOff(reason=''){
-  audienceCommandVersion++;
+  const offVersion=++audienceCommandVersion;
+  const sessionToken=audienceSessionVersion;
   activeAudienceCommand=null;
   clearAudienceTimers();
   desiredTorchOn=false;
-  setTorch(false).then(ok=>{
-    if(!ok && track) stopTorchStreamNow(reason || 'CrowdLight could not establish a safe OFF state.');
-  }).catch(()=>{
-    if(track) stopTorchStreamNow(reason || 'CrowdLight could not establish a safe OFF state.');
+
+  const offAttempt=setTorch(false).catch(()=>false);
+  Promise.race([
+    offAttempt,
+    sleep(450).then(()=>false)
+  ]).then(ok=>{
+    // A newer deliberate command owns the hardware now; never let an old
+    // safety timeout tear down that newer command's stream.
+    if(offVersion!==audienceCommandVersion) return;
+    if(sessionToken!==audienceSessionVersion) return;
+    if(!ok && track){
+      stopTorchStreamNow(reason || 'CrowdLight could not establish a safe OFF state.');
+    }
   });
+
   if(reason && !$('#readyCard')?.classList.contains('hidden')){
     $('#readyMessage').textContent=reason;
   }
@@ -1156,11 +1167,7 @@ function executeCommand(cmd){
   activeAudienceCommand={...cmd,token};
 
   if(cmd.mode==='off'){
-    activeAudienceCommand=null;
-    desiredTorchOn=false;
-    setTorch(false).then(ok=>{
-      if(!ok && track) stopTorchStreamNow('CrowdLight could not confirm BLACKOUT.');
-    });
+    failSafeAudienceOff();
     return;
   }
 
