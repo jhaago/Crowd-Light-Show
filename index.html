@@ -63,6 +63,25 @@ p{color:var(--muted);line-height:1.55;margin:0}
 .buttonGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
 .buttonGrid .wide{grid-column:1/-1}
 .blackout{min-height:72px;font-size:18px}
+.masterState{margin:2px 0 16px;padding:16px;border:1px solid var(--line);border-radius:18px;background:#090d14;display:grid;grid-template-columns:auto 1fr;grid-template-areas:"label label" "icon title" "icon detail";column-gap:12px;align-items:center;transition:.18s ease}
+.masterState .stateLabel{grid-area:label;color:var(--muted);font-size:10px;font-weight:900;letter-spacing:1.2px;margin-bottom:8px}
+.masterState .stateIcon{grid-area:icon;width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:#182132;font-size:20px;font-weight:950}
+.masterState strong{grid-area:title;font-size:20px;letter-spacing:.2px}
+.masterState small{grid-area:detail;color:var(--muted);font-size:12px;margin-top:2px}
+.masterState.state-off{border-color:rgba(255,77,95,.38);background:rgba(255,77,95,.06)}
+.masterState.state-off .stateIcon{background:rgba(255,77,95,.16);color:#ff8290}
+.masterState.state-on{border-color:rgba(67,209,124,.38);background:rgba(67,209,124,.06)}
+.masterState.state-on .stateIcon{background:rgba(67,209,124,.16);color:var(--good)}
+.masterState.state-pattern,.masterState.state-music{border-color:rgba(124,168,255,.42);background:rgba(124,168,255,.07)}
+.masterState.state-pattern .stateIcon,.masterState.state-music .stateIcon{background:rgba(124,168,255,.17);color:#bcd0ff}
+.masterState.state-flash{border-color:rgba(255,191,71,.45);background:rgba(255,191,71,.07)}
+.masterState.state-flash .stateIcon{background:rgba(255,191,71,.16);color:var(--warn)}
+.opBtn{position:relative}
+.opBtn.active{box-shadow:0 0 0 2px #dce7ff,0 10px 30px rgba(124,168,255,.2);filter:brightness(1.08)}
+.dangerBtn.opBtn.active{box-shadow:0 0 0 2px #ff97a2,0 10px 30px rgba(255,77,95,.23)}
+.opBtn.sent:after{content:"SENT";position:absolute;right:9px;top:8px;font-size:9px;font-weight:950;letter-spacing:.7px;padding:3px 6px;border-radius:99px;background:rgba(255,255,255,.18);color:inherit}
+.commandResult{margin-top:10px;min-height:20px;text-align:center;font-size:12px;font-weight:800;color:var(--muted)}
+.commandResult.ok{color:var(--good)}.commandResult.bad{color:var(--danger)}
 .control{margin-top:17px}
 .controlHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:13px;color:#cdd6e5;font-weight:780}
 .value{font-variant-numeric:tabular-nums;color:white}
@@ -143,14 +162,24 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
       <div>
         <section class="card">
           <div class="sectionHead">
-            <div><h2>Show control</h2><div class="sub" id="masterModeText">BLACKOUT</div></div>
+            <div><h2>Show control</h2><div class="sub">Live operator controls</div></div>
             <div class="pill"><span class="dot good"></span><span id="masterClock">SYNC CLOCK</span></div>
           </div>
-          <div class="buttonGrid">
-            <button class="secondary" id="allOnBtn">ALL ON</button>
-            <button class="primary" id="flashNowBtn">SYNC FLASH</button>
-            <button class="dangerBtn wide blackout" id="blackoutBtn">BLACKOUT</button>
+
+          <div class="masterState state-off" id="masterState">
+            <span class="stateLabel">CURRENT STATE</span>
+            <span class="stateIcon" id="masterStateIcon">■</span>
+            <strong id="masterStateTitle">BLACKOUT</strong>
+            <small id="masterStateDetail">All audience flashlights are commanded off.</small>
           </div>
+          <div id="masterModeText" class="hidden">BLACKOUT</div>
+
+          <div class="buttonGrid">
+            <button class="secondary opBtn" id="allOnBtn" data-op="on">ALL LIGHTS ON</button>
+            <button class="primary opBtn" id="flashNowBtn" data-op="flash">ONE SYNC FLASH</button>
+            <button class="dangerBtn wide blackout opBtn active" id="blackoutBtn" data-op="off">BLACKOUT</button>
+          </div>
+          <div class="commandResult" id="commandResult">Ready for a command.</div>
           <div class="warning">Rapid strobe is intentionally disabled. CrowdLight limits sustained flashing to 2 flashes per second to reduce photosensitive-seizure risk.</div>
         </section>
 
@@ -180,7 +209,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
 
           <div class="actions">
             <button class="secondary" id="tapBtn">TAP TEMPO</button>
-            <button class="primary" id="startBpmBtn">START BPM</button>
+            <button class="primary opBtn" id="startBpmBtn" data-op="pattern">START BPM FLASHING</button>
           </div>
         </section>
 
@@ -208,7 +237,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
 
           <div class="actions">
             <button class="secondary" id="listenBtn">START LISTENING</button>
-            <button class="primary" id="musicSyncBtn" disabled>START MUSIC SYNC</button>
+            <button class="primary opBtn" id="musicSyncBtn" data-op="music" disabled>START MUSIC SYNC</button>
           </div>
         </section>
       </div>
@@ -252,7 +281,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.5 • strict torch verification • Firebase live sync</div>
+  <div class="footer">CrowdLight prototype v0.6 • improved master console • blackout fix</div>
 </div>
 
 <script type="module">
@@ -607,6 +636,7 @@ async function publishCommand(cmd, {keep=false}={}){
     clearInterval(keepAliveTimer);
     keepAliveTimer=null;
   }
+  return remoteOk;
 }
 
 function resetKeepAlive(){
@@ -801,40 +831,137 @@ async function saveConfig(){
   }
   log('Configuration saved for room '+room+'.');
 }
+function setMasterState(state,title,detail,icon){
+  const box=$('#masterState');
+  if(!box) return;
+  box.className='masterState state-'+state;
+  $('#masterStateTitle').textContent=title;
+  $('#masterStateDetail').textContent=detail;
+  $('#masterStateIcon').textContent=icon || '●';
+
+  $('.opBtn').forEach(b=>b.classList.remove('active'));
+  if(state==='off') $('#blackoutBtn')?.classList.add('active');
+  if(state==='on') $('#allOnBtn')?.classList.add('active');
+  if(state==='pattern') $('#startBpmBtn')?.classList.add('active');
+  if(state==='music') $('#musicSyncBtn')?.classList.add('active');
+}
+
+function showCommandResult(text,ok=true){
+  const el=$('#commandResult');
+  if(!el) return;
+  el.textContent=text;
+  el.className='commandResult '+(ok?'ok':'bad');
+}
+
+function markSent(btn){
+  if(!btn) return;
+  btn.classList.add('sent');
+  setTimeout(()=>btn.classList.remove('sent'),700);
+}
+
 function commandBase(mode){
   return {id:uid(),mode,room,issuedAt:nowServer(),validUntil:nowServer()+COMMAND_TTL};
 }
 async function masterOff(){
+  // Cancel the old repeating command BEFORE the network write. In v0.5 the
+  // keepalive could fire while BLACKOUT was being sent and overwrite it.
+  currentMasterCommand=null;
+  clearInterval(keepAliveTimer);
+  keepAliveTimer=null;
+
+  musicSyncRunning=false;
+  $('#musicSyncBtn').textContent='START MUSIC SYNC';
+  $('#startBpmBtn').textContent='START BPM FLASHING';
   $('#masterModeText').textContent='BLACKOUT';
-  musicSyncRunning=false; $('#musicSyncBtn').textContent='START MUSIC SYNC';
-  await publishCommand({...commandBase('off'), validUntil:nowServer()+60000});
+  setMasterState('off','BLACKOUT','All audience flashlights are commanded off.','■');
+  showCommandResult('Sending BLACKOUT…',true);
+  markSent($('#blackoutBtn'));
+
+  const ok=await pushRemoteCommand({...commandBase('off'),validUntil:nowServer()+60000});
+  try{ localChannel?.postMessage({type:'command',command:{...commandBase('off'),validUntil:nowServer()+60000}}); }catch(e){}
+  showCommandResult(ok?'BLACKOUT sent successfully.':'BLACKOUT failed to send.',ok);
+
+  // A second off write shortly afterwards also protects against an already
+  // in-flight stale keepalive from a previous mode.
+  if(ok){
+    setTimeout(()=>pushRemoteCommand({...commandBase('off'),validUntil:nowServer()+60000}),350);
+  }
 }
+
 async function masterOn(){
-  const c={...commandBase('steady'),startAt:nowServer()+750};
+  musicSyncRunning=false;
+  $('#musicSyncBtn').textContent='START MUSIC SYNC';
+  $('#startBpmBtn').textContent='START BPM FLASHING';
+  const cmd={...commandBase('steady'),startAt:nowServer()+750};
   $('#masterModeText').textContent='STEADY ON';
-  await publishCommand(c,{keep:true});
+  setMasterState('on','ALL LIGHTS ON','Audience flashlights are commanded to remain on.','●');
+  showCommandResult('Sending ALL LIGHTS ON…',true);
+  markSent($('#allOnBtn'));
+  await publishCommand(cmd,{keep:true});
+  showCommandResult(firebaseConnected?'ALL LIGHTS ON sent successfully.':'Command sent; Firebase is reconnecting.',firebaseConnected);
 }
+
 async function masterFlash(){
-  const c={...commandBase('flash'),startAt:nowServer()+900,flashMs:+$('#flashMsRange').value};
+  const previous=currentMasterCommand ? {...currentMasterCommand} : null;
+  const previousMusic=musicSyncRunning;
+  const cmd={...commandBase('flash'),startAt:nowServer()+900,flashMs:+$('#flashMsRange').value};
   $('#masterModeText').textContent='SYNC FLASH';
-  await publishCommand(c);
+  setMasterState('flash','SYNC FLASH SENT',`One ${cmd.flashMs} ms flash is scheduled across the crowd.`,'✦');
+  showCommandResult('Scheduling synchronized flash…',true);
+  markSent($('#flashNowBtn'));
+  const ok=await pushRemoteCommand(cmd);
+  try{ localChannel?.postMessage({type:'command',command:cmd}); }catch(e){}
+  showCommandResult(ok?'SYNC FLASH sent successfully.':'SYNC FLASH failed to send.',ok);
+
+  // Restore any persistent mode after the one-shot flash has completed.
+  setTimeout(async()=>{
+    if(previous && currentMasterCommand){
+      const restore={...previous,id:uid(),issuedAt:nowServer(),validUntil:nowServer()+COMMAND_TTL};
+      currentMasterCommand=restore;
+      await pushRemoteCommand(restore);
+      if(previous.mode==='steady'){
+        setMasterState('on','ALL LIGHTS ON','Audience flashlights are commanded to remain on.','●');
+      }else if(previous.mode==='pattern'){
+        const bpm=Number(previous.bpm)||+$('#bpmRange').value;
+        if(previousMusic || musicSyncRunning){
+          setMasterState('music','MUSIC SYNC',`Following detected music at about ${Math.round(bpm)} BPM.`,'♫');
+        }else{
+          setMasterState('pattern','BPM FLASHING',`${Math.round(bpm)} BPM • every ${division===1?'beat':division+' beats'}.`,'↻');
+        }
+      }
+    }else{
+      setMasterState('off','BLACKOUT','All audience flashlights are commanded off.','■');
+    }
+  },1250);
 }
+
 async function masterPattern(phaseWall=0, bpmOverride=0){
   let bpm=bpmOverride || +$('#bpmRange').value;
   const flashMs=+$('#flashMsRange').value;
   const actualPeriod=Math.max(1000/MAX_FLASH_HZ,(60000/bpm)*division);
   let phaseStart;
   if(phaseWall){
-    // Convert a local wall-clock beat phase into server time, then roll ahead.
     phaseStart=phaseWall+serverOffset;
     while(phaseStart < nowServer()+1100) phaseStart += actualPeriod;
   }else{
     phaseStart=nowServer()+1200;
   }
   masterPhaseWall=phaseStart-serverOffset;
-  const c={...commandBase('pattern'),bpm,division,flashMs,phaseStart,startAt:phaseStart};
+  const cmd={...commandBase('pattern'),bpm,division,flashMs,phaseStart,startAt:phaseStart};
   $('#masterModeText').textContent=`${bpm.toFixed(0)} BPM • EVERY ${division}`;
-  await publishCommand(c,{keep:true});
+
+  if(musicSyncRunning){
+    setMasterState('music','MUSIC SYNC',`Following detected music at about ${Math.round(bpm)} BPM.`,'♫');
+    $('#musicSyncBtn').textContent='STOP MUSIC SYNC';
+    $('#startBpmBtn').textContent='START BPM FLASHING';
+  }else{
+    setMasterState('pattern','BPM FLASHING',`${Math.round(bpm)} BPM • flash every ${division===1?'beat':division+' beats'}.`,'↻');
+    $('#startBpmBtn').textContent='STOP BPM FLASHING';
+  }
+  showCommandResult('Starting synchronized pattern…',true);
+  markSent(musicSyncRunning?$('#musicSyncBtn'):$('#startBpmBtn'));
+  await publishCommand(cmd,{keep:true});
+  showCommandResult(firebaseConnected?'Pattern is live.':'Pattern command sent; Firebase is reconnecting.',firebaseConnected);
 }
 function setDivision(d){
   division=+d;
@@ -883,7 +1010,13 @@ function initMaster(){
   $('#allOnBtn').onclick=masterOn;
   $('#flashNowBtn').onclick=masterFlash;
   $('#blackoutBtn').onclick=masterOff;
-  $('#startBpmBtn').onclick=()=>masterPattern(Date.now());
+  $('#startBpmBtn').onclick=()=>{
+    if(currentMasterCommand?.mode==='pattern' && !musicSyncRunning) masterOff();
+    else{
+      musicSyncRunning=false;
+      masterPattern(Date.now());
+    }
+  };
   $('#tapBtn').onclick=tapTempo;
   $('#bpmRange').oninput=updateRhythmReadouts;
   $('#flashMsRange').oninput=updateRhythmReadouts;
@@ -891,15 +1024,19 @@ function initMaster(){
   $$('#divisionSeg button').forEach(b=>b.onclick=()=>setDivision(b.dataset.div));
   $('#listenBtn').onclick=toggleListening;
   $('#musicSyncBtn').onclick=()=>{
-    musicSyncRunning=!musicSyncRunning;
-    $('#musicSyncBtn').textContent=musicSyncRunning?'STOP MUSIC SYNC':'START MUSIC SYNC';
     if(musicSyncRunning){
-      if(detectedPeriod){
-        const bpm=60000/detectedPeriod;
-        masterPattern(lastOnset || Date.now(),bpm);
-      }
-    }else{
       masterOff();
+      return;
+    }
+    musicSyncRunning=true;
+    $('#musicSyncBtn').textContent='STOP MUSIC SYNC';
+    if(detectedPeriod){
+      const bpm=60000/detectedPeriod;
+      masterPattern(lastOnset || Date.now(),bpm);
+    }else{
+      setMasterState('music','MUSIC SYNC ARMED','Listening for a stable beat before flashing begins.','♫');
+      showCommandResult('Music Sync is armed; waiting for a stable beat.',true);
+      markSent($('#musicSyncBtn'));
     }
   };
 }
