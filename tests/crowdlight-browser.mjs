@@ -296,6 +296,54 @@ async function testAudienceSuccess(browser) {
   assert.equal(fake.on, false);
   assert.ok(fake.toggles.length >= before + 2, "Scheduled flash did not toggle on/off");
 
+  // C4 regression: repeated one-shot commands are subject to the same global
+  // physical ON limiter as rhythmic patterns.
+  await page.waitForTimeout(520);
+  const rapidStart = await page.evaluate(() => window.__fakeTorch.toggles.length);
+  for (let i = 0; i < 8; i++) {
+    await page.evaluate(i => {
+      const now = Date.now();
+      window.__crowdlightInjectCommand({
+        id: "rapid-flash-" + i,
+        mode: "flash",
+        startAt: now + 20,
+        validUntil: now + 800,
+        flashMs: 45
+      });
+    }, i);
+    await page.waitForTimeout(190);
+  }
+  await page.waitForTimeout(180);
+  const rapidOnTimes = await page.evaluate(start => (
+    window.__fakeTorch.toggles.slice(start).filter(x => x.on).map(x => x.at)
+  ), rapidStart);
+  for (let i = 1; i < rapidOnTimes.length; i++) {
+    assert.ok(
+      rapidOnTimes[i] - rapidOnTimes[i - 1] >= 430,
+      "Repeated one-shots exceeded the global 2 flashes/sec safety ceiling"
+    );
+  }
+
+  // Execution-time freshness: a flash received on time but delayed by an
+  // event-loop stall must be dropped when its callback finally runs late.
+  await page.waitForTimeout(520);
+  const delayedStart = await page.evaluate(() => window.__fakeTorch.toggles.length);
+  await page.evaluate(() => {
+    const now = Date.now();
+    window.__crowdlightInjectCommand({
+      id: "execute-late-flash",
+      mode: "flash",
+      startAt: now + 40,
+      validUntil: now + 1500,
+      flashMs: 60
+    });
+    const stop = performance.now() + 720;
+    while (performance.now() < stop) {}
+  });
+  await page.waitForTimeout(120);
+  const delayedAfter = await page.evaluate(() => window.__fakeTorch.toggles.length);
+  assert.equal(delayedAfter, delayedStart, "An overdue scheduled flash executed after event-loop suspension");
+
   // If a persistent command stops being refreshed, the phone must fail safe OFF.
   // Allow the previous flash's global 2 Hz safety interval to clear first.
   await page.waitForTimeout(520);
