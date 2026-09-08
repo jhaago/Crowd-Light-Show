@@ -252,7 +252,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.2 • Firebase connected • Flashlight only</div>
+  <div class="footer">CrowdLight prototype v0.3 • multi-camera torch detection • Firebase connected</div>
 </div>
 
 <script>
@@ -341,33 +341,99 @@ function openLocalChannel(){
 // ---------------- TORCH ----------------
 async function requestTorch(){
   if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access is not supported in this browser.');
-  stream = await navigator.mediaDevices.getUserMedia({
-    video:{
-      facingMode:{ideal:'environment'},
-      width:{ideal:640},
-      height:{ideal:480}
-    },
-    audio:false
-  });
-  track = stream.getVideoTracks()[0];
-  $('#hiddenVideo').srcObject = stream;
-  try{ await $('#hiddenVideo').play(); }catch(e){}
 
-  let caps = {};
-  try{ caps = track.getCapabilities ? track.getCapabilities() : {}; }catch(e){}
-  torchAvailable = !!caps.torch;
-
-  // Some browsers expose torch even when capability reporting is incomplete.
-  if(!torchAvailable){
-    try{
-      await track.applyConstraints({advanced:[{torch:true}]});
-      torchAvailable = true;
-      await sleep(100);
-      await track.applyConstraints({advanced:[{torch:false}]});
-    }catch(e){}
+  async function stopCandidate(s){
+    if(!s) return;
+    try{s.getTracks().forEach(t=>t.stop())}catch(e){}
   }
-  if(!torchAvailable) throw new Error('This browser/device did not expose flashlight control.');
-  return true;
+
+  async function candidateHasTorch(s){
+    const t=s?.getVideoTracks?.()[0];
+    if(!t) return false;
+    let caps={};
+    try{ caps=t.getCapabilities ? t.getCapabilities() : {}; }catch(e){}
+    if(caps && caps.torch === true) return true;
+
+    // Some Chromium builds accept the torch constraint even when it is omitted
+    // from getCapabilities(), so probe it briefly.
+    try{
+      await t.applyConstraints({advanced:[{torch:true}]});
+      await sleep(80);
+      await t.applyConstraints({advanced:[{torch:false}]});
+      return true;
+    }catch(e){
+      try{
+        await t.applyConstraints({torch:true});
+        await sleep(80);
+        await t.applyConstraints({torch:false});
+        return true;
+      }catch(e2){}
+    }
+    return false;
+  }
+
+  async function adoptCandidate(s){
+    stream=s;
+    track=s.getVideoTracks()[0];
+    $('#hiddenVideo').srcObject=s;
+    try{ await $('#hiddenVideo').play(); }catch(e){}
+    torchAvailable=true;
+    return true;
+  }
+
+  // First try the browser's preferred rear-facing camera.
+  let first=null;
+  try{
+    first=await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'},width:{ideal:640},height:{ideal:480}},
+      audio:false
+    });
+    if(await candidateHasTorch(first)) return adoptCandidate(first);
+  }catch(e){}
+
+  // Permission is now granted, so camera labels/device IDs should be available.
+  // Multi-camera phones can expose several rear lenses and only one may expose torch.
+  let devices=[];
+  try{
+    devices=(await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput');
+  }catch(e){}
+
+  let firstId='';
+  try{ firstId=first?.getVideoTracks?.()[0]?.getSettings?.().deviceId || ''; }catch(e){}
+  await stopCandidate(first);
+  first=null;
+
+  // Prefer labels that look rear-facing; still try every camera as a fallback.
+  const score=d=>{
+    const l=(d.label||'').toLowerCase();
+    let s=0;
+    if(/back|rear|environment/.test(l)) s+=20;
+    if(/front|user|selfie/.test(l)) s-=20;
+    if(d.deviceId===firstId) s-=2;
+    return s;
+  };
+  devices.sort((a,b)=>score(b)-score(a));
+
+  let tried=0;
+  for(const d of devices){
+    let s=null;
+    try{
+      s=await navigator.mediaDevices.getUserMedia({
+        video:{
+          deviceId:{exact:d.deviceId},
+          width:{ideal:640},
+          height:{ideal:480}
+        },
+        audio:false
+      });
+      tried++;
+      if(await candidateHasTorch(s)) return adoptCandidate(s);
+    }catch(e){}
+    await stopCandidate(s);
+  }
+
+  torchAvailable=false;
+  throw new Error('I tested '+Math.max(tried,1)+' camera input'+(tried===1?'':'s')+' on this phone, but none exposed flashlight control to the browser.');
 }
 async function setTorch(on){
   if(!track || track.readyState !== 'live') return false;
