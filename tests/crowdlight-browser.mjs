@@ -129,6 +129,15 @@ async function makeAudiencePage(browser, torchSupported = true) {
     window.__fakeTorch = { on: false, toggles: [], stopped: false };
     window.alert = msg => { window.__lastAlert = String(msg); };
 
+    // The product receives a real MediaStream on phones. The headless test uses
+    // a lightweight fake, so make the hidden video element accept that object.
+    Object.defineProperty(HTMLMediaElement.prototype, "srcObject", {
+      configurable: true,
+      get() { return this.__crowdlightSrcObject || null; },
+      set(value) { this.__crowdlightSrcObject = value; }
+    });
+    HTMLMediaElement.prototype.play = async function(){};
+
     const track = {
       readyState: "live",
       getCapabilities() { return supported ? { torch: true } : {}; },
