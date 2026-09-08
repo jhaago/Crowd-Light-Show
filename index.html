@@ -1059,7 +1059,7 @@ function setEffect(effect){
 }
 function setDivision(d){
   division=+d;
-  $$$('#divisionSeg button').forEach(b=>b.classList.toggle('active',+b.dataset.div===division));
+  $$('#divisionSeg button').forEach(b=>b.classList.toggle('active',+b.dataset.div===division));
   $('#divisionText').textContent=division===1?'1 beat':division+' beats';
 }
 function tapTempo(){
