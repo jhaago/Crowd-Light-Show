@@ -297,6 +297,8 @@ async function testAudienceSuccess(browser) {
   assert.ok(fake.toggles.length >= before + 2, "Scheduled flash did not toggle on/off");
 
   // If a persistent command stops being refreshed, the phone must fail safe OFF.
+  // Allow the previous flash's global 2 Hz safety interval to clear first.
+  await page.waitForTimeout(520);
   await page.evaluate(() => window.__crowdlightInjectCommand({
     id: "expiring-steady",
     mode: "steady",
