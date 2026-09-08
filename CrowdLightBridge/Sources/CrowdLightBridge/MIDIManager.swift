@@ -38,6 +38,7 @@ final class MIDIManager: ObservableObject {
 
     private var client = MIDIClientRef()
     private var inputPort = MIDIPortRef()
+    private var outputPort = MIDIPortRef()
     private var connectedEndpoint = MIDIEndpointRef()
 
     init() {
@@ -50,6 +51,7 @@ final class MIDIManager: ObservableObject {
             MIDIPortDisconnectSource(inputPort, connectedEndpoint)
         }
         if inputPort != 0 { MIDIPortDispose(inputPort) }
+        if outputPort != 0 { MIDIPortDispose(outputPort) }
         if client != 0 { MIDIClientDispose(client) }
     }
 
@@ -75,6 +77,15 @@ final class MIDIManager: ObservableObject {
         )
         if portStatus != noErr {
             lastMessage = "Could not create MIDI input port (\(portStatus))"
+        }
+
+        let outputStatus = MIDIOutputPortCreate(
+            client,
+            "CrowdLight MIDI Test Output" as CFString,
+            &outputPort
+        )
+        if outputStatus != noErr {
+            lastMessage = "Could not create MIDI test output port (\(outputStatus))"
         }
     }
 
@@ -184,6 +195,121 @@ final class MIDIManager: ObservableObject {
             return source.id
         }
         return nil
+    }
+
+    static func noteOnBytes(note: Int, channel: Int, velocity: Int = 100) -> [UInt8] {
+        let safeNote = UInt8(max(0, min(127, note)))
+        let safeChannel = UInt8(max(1, min(16, channel)) - 1)
+        let safeVelocity = UInt8(max(1, min(127, velocity)))
+        return [0x90 | safeChannel, safeNote, safeVelocity]
+    }
+
+    static func bestDestinationIndex(
+        sourceName: String,
+        destinationNames: [String]
+    ) -> Int? {
+        let source = sourceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let exact = destinationNames.firstIndex(where: {
+            $0.compare(source, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+        }) {
+            return exact
+        }
+
+        let crowdMatches = destinationNames.enumerated().filter {
+            $0.element.localizedCaseInsensitiveContains("CrowdLight")
+        }
+        if crowdMatches.count == 1 {
+            return crowdMatches[0].offset
+        }
+
+        return nil
+    }
+
+    func sendLoopbackTest(
+        note: Int = 127,
+        channel: Int,
+        velocity: Int = 100
+    ) -> Result<String, Error> {
+        guard outputPort != 0 else {
+            return .failure(MIDILoopbackError.outputPortUnavailable)
+        }
+        guard connectedSourceID != 0 else {
+            return .failure(MIDILoopbackError.noSelectedSource)
+        }
+
+        var destinations: [(endpoint: MIDIEndpointRef, name: String)] = []
+        for index in 0..<MIDIGetNumberOfDestinations() {
+            let endpoint = MIDIGetDestination(index)
+            guard endpoint != 0 else { continue }
+
+            var unmanagedName: Unmanaged<CFString>?
+            var name = "MIDI Destination \(index + 1)"
+            if MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &unmanagedName) == noErr,
+               let unmanagedName {
+                name = unmanagedName.takeRetainedValue() as String
+            } else {
+                var fallback: Unmanaged<CFString>?
+                if MIDIObjectGetStringProperty(endpoint, kMIDIPropertyName, &fallback) == noErr,
+                   let fallback {
+                    name = fallback.takeRetainedValue() as String
+                }
+            }
+            destinations.append((endpoint, name))
+        }
+
+        let names = destinations.map(\.name)
+        guard let match = Self.bestDestinationIndex(
+            sourceName: connectedSourceName,
+            destinationNames: names
+        ) else {
+            return .failure(
+                MIDILoopbackError.noMatchingDestination(
+                    source: connectedSourceName,
+                    destinations: names
+                )
+            )
+        }
+
+        let bytes = Self.noteOnBytes(
+            note: note,
+            channel: channel,
+            velocity: velocity
+        )
+
+        let capacity = 64
+        let raw = UnsafeMutableRawPointer.allocate(
+            byteCount: capacity,
+            alignment: MemoryLayout<MIDIPacketList>.alignment
+        )
+        defer { raw.deallocate() }
+
+        let packetList = raw.bindMemory(to: MIDIPacketList.self, capacity: 1)
+        var packet = MIDIPacketListInit(packetList)
+        let added = bytes.withUnsafeBufferPointer { buffer in
+            MIDIPacketListAdd(
+                packetList,
+                capacity,
+                packet,
+                0,
+                buffer.count,
+                buffer.baseAddress!
+            )
+        }
+
+        guard added != nil else {
+            return .failure(MIDILoopbackError.packetBuildFailed)
+        }
+
+        let status = MIDISend(
+            outputPort,
+            destinations[match].endpoint,
+            UnsafePointer(packetList)
+        )
+        guard status == noErr else {
+            return .failure(MIDILoopbackError.sendFailed(status))
+        }
+
+        return .success(destinations[match].name)
     }
 
     static func parseNoteOns(bytes: [UInt8]) -> [ParsedMIDINoteOn] {
@@ -310,4 +436,29 @@ final class MIDIManager: ObservableObject {
         }
     }
 
+}
+
+
+enum MIDILoopbackError: LocalizedError {
+    case outputPortUnavailable
+    case noSelectedSource
+    case noMatchingDestination(source: String, destinations: [String])
+    case packetBuildFailed
+    case sendFailed(OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .outputPortUnavailable:
+            return "CrowdLight could not create its CoreMIDI test output port."
+        case .noSelectedSource:
+            return "Select the CrowdLight IAC MIDI source first."
+        case .noMatchingDestination(let source, let destinations):
+            let available = destinations.isEmpty ? "none" : destinations.joined(separator: ", ")
+            return "No matching IAC MIDI destination was found for \(source). Available destinations: \(available)."
+        case .packetBuildFailed:
+            return "CrowdLight could not build the MIDI loopback packet."
+        case .sendFailed(let status):
+            return "CoreMIDI could not send the loopback test (OSStatus \(status))."
+        }
+    }
 }
