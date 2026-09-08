@@ -7,14 +7,9 @@ cd "$ROOT"
 rm -rf dist
 mkdir -p dist
 
-if swift build -c release --arch arm64 --arch x86_64; then
-  BIN=".build/apple/Products/Release/CrowdLightBridge"
-  if [ ! -f "$BIN" ]; then
-    BIN=".build/release/CrowdLightBridge"
-  fi
-else
-  echo "Universal build failed; falling back to the runner architecture."
-  swift build -c release
+swift build -c release --arch arm64 --arch x86_64
+BIN=".build/apple/Products/Release/CrowdLightBridge"
+if [ ! -f "$BIN" ]; then
   BIN=".build/release/CrowdLightBridge"
 fi
 
@@ -62,6 +57,19 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+plutil -lint "$APP/Contents/Info.plist"
+
+ARCHS="$(lipo -archs "$APP/Contents/MacOS/CrowdLightBridge")"
+echo "Built architectures: $ARCHS"
+if [[ "$ARCHS" != *"arm64"* || "$ARCHS" != *"x86_64"* ]]; then
+  echo "Expected a universal arm64 + x86_64 binary."
+  exit 1
+fi
+
 codesign --force --deep --sign - "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
+
 ditto -c -k --sequesterRsrc --keepParent "$APP" "dist/CrowdLight-Bridge-macOS.zip"
-echo "Created $ROOT/dist/CrowdLight-Bridge-macOS.zip"
+unzip -t "dist/CrowdLight-Bridge-macOS.zip"
+
+echo "Created and verified $ROOT/dist/CrowdLight-Bridge-macOS.zip"
