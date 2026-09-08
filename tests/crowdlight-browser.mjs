@@ -506,6 +506,42 @@ async function testPendingOnBlackout(browser) {
   await page.close();
 }
 
+async function testHungOnBlackoutForcesStop(browser) {
+  const page = await makeAudiencePage(browser, true);
+  const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+
+  await page.goto(base + "?test=1", { waitUntil: "networkidle" });
+  await page.click("#joinBtn");
+  await page.waitForSelector("#readyCard:not(.hidden)", { timeout: 3000 });
+  await page.waitForTimeout(520);
+
+  await page.evaluate(() => { window.__fakeTorch.onDelayMs = 1500; });
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "hung-on-steady",
+    mode: "steady",
+    startAt: Date.now() + 10,
+    validUntil: Date.now() + 3000
+  }));
+  await page.waitForTimeout(60);
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "hung-on-blackout",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+
+  await page.waitForTimeout(620);
+  assert.equal(
+    await page.evaluate(() => window.__fakeTorch.stopped),
+    true,
+    "Hung ON operation did not trigger bounded BLACKOUT stream stop"
+  );
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false);
+
+  assert.deepEqual(errors, [], "Hung-ON test JavaScript errors: " + errors.join(" | "));
+  await page.close();
+}
+
 async function testOffFailureStopsStream(browser) {
   const page = await makeAudiencePage(browser, true);
   const errors = [];
@@ -562,6 +598,7 @@ try {
   await testDeferredMasterWriteFencing(browser);
   await testAudienceSuccess(browser);
   await testPendingOnBlackout(browser);
+  await testHungOnBlackoutForcesStop(browser);
   await testOffFailureStopsStream(browser);
   await testAudienceFailure(browser);
   console.log("CrowdLight browser regression tests passed.");
