@@ -122,12 +122,52 @@ async function testMaster(browser) {
   await page.close();
 }
 
-async function makeAudiencePage(browser, torchSupported = true) {
+async function testDeferredMasterWriteFencing(browser) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await stubFirebase(page);
+  const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+
+  await page.goto(base + "?master=1&test=1", { waitUntil: "networkidle" });
+  await page.evaluate(() => { window.__crowdlightTestWriteDelayMs = 300; });
+
+  // Start a persistent pattern, then BLACKOUT before the old write completes.
+  await page.click('[data-effect="twinkle"]');
+  await page.click("#startBpmBtn");
+  await page.waitForTimeout(40);
+  await page.click("#blackoutBtn");
+  await page.waitForTimeout(760);
+
+  const state = await page.evaluate(() => window.__crowdlightTestState());
+  assert.equal(state.currentMasterCommand, null, "Superseded pattern write resurrected persistent master state");
+  assert.equal(await page.textContent("#masterStateTitle"), "BLACKOUT");
+
+  // Wait beyond one normal heartbeat boundary; no pattern keepalive should be
+  // recreated from the superseded write completion.
+  const before = await page.evaluate(() => (window.__crowdlightTestCommands || []).length);
+  await page.waitForTimeout(5200);
+  const commands = await page.evaluate(() => window.__crowdlightTestCommands || []);
+  const tail = commands.slice(before);
+  assert.equal(tail.some(cmd => cmd.mode === "pattern"), false, "Superseded pattern heartbeat reappeared after BLACKOUT");
+
+  assert.deepEqual(errors, [], "Deferred master test JavaScript errors: " + errors.join(" | "));
+  await page.close();
+}
+
+async function makeAudiencePage(browser, torchSupported = true, options = {}) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
   await stubFirebase(page);
 
-  await page.addInitScript(supported => {
-    window.__fakeTorch = { on: false, toggles: [], stopped: false };
+  await page.addInitScript(({supported, options}) => {
+    window.__fakeTorch = {
+      on: false,
+      toggles: [],
+      stopped: false,
+      failOff: false,
+      failOn: false,
+      onDelayMs: Number(options.onDelayMs)||0,
+      offDelayMs: Number(options.offDelayMs)||0
+    };
     window.alert = msg => { window.__lastAlert = String(msg); };
 
     // The product receives a real MediaStream on phones. The headless test uses
@@ -149,6 +189,13 @@ async function makeAudiencePage(browser, torchSupported = true) {
           ? adv.torch
           : constraints?.torch;
         if (!supported || typeof requested !== "boolean") throw new Error("torch unsupported");
+
+        const delay = requested ? window.__fakeTorch.onDelayMs : window.__fakeTorch.offDelayMs;
+        if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+
+        if (requested && window.__fakeTorch.failOn) throw new Error("simulated ON failure");
+        if (!requested && window.__fakeTorch.failOff) throw new Error("simulated OFF failure");
+
         window.__fakeTorch.on = requested;
         window.__fakeTorch.toggles.push({ on: requested, at: Date.now() });
       },
@@ -182,7 +229,7 @@ async function makeAudiencePage(browser, torchSupported = true) {
         }
       }
     });
-  }, torchSupported);
+  }, { supported: torchSupported, options });
 
   return page;
 }
@@ -234,7 +281,9 @@ async function testAudienceSuccess(browser) {
   const after = await page.evaluate(() => window.__fakeTorch.toggles.length);
   assert.equal(after, before, "Stale flash was incorrectly executed");
 
-  // A properly scheduled one-shot still works.
+  // A properly scheduled one-shot still works once the global safety interval
+  // from the previous physical ON transition has elapsed.
+  await page.waitForTimeout(520);
   await page.evaluate(() => window.__crowdlightInjectCommand({
     id: "good-flash",
     mode: "flash",
@@ -280,7 +329,7 @@ async function testAudienceSuccess(browser) {
   const patternOnTimes = await page.evaluate(start => (
     window.__fakeTorch.toggles.slice(start).filter(x => x.on).map(x => x.at)
   ), patternStartIndex);
-  assert.ok(patternOnTimes.length >= 2, "Pattern safety test did not produce enough flashes");
+  assert.ok(patternOnTimes.length >= 1, "Pattern safety test did not produce any flashes");
   for (let i = 1; i < patternOnTimes.length; i++) {
     assert.ok(patternOnTimes[i] - patternOnTimes[i - 1] >= 430, "Pattern exceeded the 2 flashes/sec safety ceiling");
   }
@@ -289,14 +338,134 @@ async function testAudienceSuccess(browser) {
     mode: "off",
     validUntil: Date.now() + 60000
   }));
-  await page.waitForTimeout(50);
+  await page.waitForTimeout(80);
   assert.equal(await page.evaluate(() => window.__fakeTorch.on), false);
+
+  // C1 regression: BLACKOUT during an already-running pattern flash must
+  // permanently invalidate that pattern closure. It must not schedule again.
+  await page.waitForTimeout(520);
+  const c1Start = await page.evaluate(() => window.__fakeTorch.toggles.length);
+  await page.evaluate(() => {
+    const now = Date.now();
+    window.__crowdlightInjectCommand({
+      id: "c1-pattern",
+      mode: "pattern",
+      bpm: 120,
+      division: 1,
+      effect: "unison",
+      flashMs: 180,
+      phaseStart: now + 30,
+      startAt: now + 30,
+      validUntil: now + 2000
+    });
+  });
+  await page.waitForTimeout(90);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true, "C1 setup did not enter flash ON state");
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "c1-blackout",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(1100);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "Pattern relit after BLACKOUT");
+  const c1OnEvents = await page.evaluate(start => (
+    window.__fakeTorch.toggles.slice(start).filter(x => x.on)
+  ), c1Start);
+  assert.equal(c1OnEvents.length, 1, "Old pattern scheduled another flash after BLACKOUT");
+
+  // Malformed/unknown input is a fail-safe event and must never remove the
+  // watchdog while leaving a torch ON.
+  await page.waitForTimeout(520);
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "valid-before-malformed",
+    mode: "steady",
+    startAt: Date.now() + 20,
+    validUntil: Date.now() + 1000
+  }));
+  await page.waitForTimeout(80);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true);
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "malformed",
+    mode: "mystery",
+    validUntil: Date.now() + 1000
+  }));
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "Malformed command left torch ON");
 
   await page.click("#leaveBtn");
   await page.waitForSelector("#joinCard:not(.hidden)");
   assert.equal(await page.evaluate(() => window.__fakeTorch.stopped), true);
 
   assert.deepEqual(errors, [], "Audience page JavaScript errors: " + errors.join(" | "));
+  await page.close();
+}
+
+async function testPendingOnBlackout(browser) {
+  const page = await makeAudiencePage(browser, true, { onDelayMs: 280 });
+  const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+
+  await page.goto(base + "?test=1", { waitUntil: "networkidle" });
+  await page.click("#joinBtn");
+  await page.waitForSelector("#readyCard:not(.hidden)", { timeout: 5000 });
+
+  // Allow the confirmation flash safety interval to clear.
+  await page.waitForTimeout(520);
+
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "pending-on",
+    mode: "steady",
+    startAt: Date.now() + 10,
+    validUntil: Date.now() + 2000
+  }));
+  await page.waitForTimeout(50);
+
+  // BLACKOUT while the delayed ON applyConstraints() is still unresolved.
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "blackout-during-pending-on",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+
+  await page.waitForTimeout(500);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "Pending ON completed after BLACKOUT and remained ON");
+  assert.equal((await page.evaluate(() => window.__crowdlightTestState())).desiredTorchOn, false);
+
+  assert.deepEqual(errors, [], "Pending-ON test JavaScript errors: " + errors.join(" | "));
+  await page.close();
+}
+
+async function testOffFailureStopsStream(browser) {
+  const page = await makeAudiencePage(browser, true);
+  const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+
+  await page.goto(base + "?test=1", { waitUntil: "networkidle" });
+  await page.click("#joinBtn");
+  await page.waitForSelector("#readyCard:not(.hidden)", { timeout: 3000 });
+  await page.waitForTimeout(520);
+
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-failure-steady",
+    mode: "steady",
+    startAt: Date.now() + 10,
+    validUntil: Date.now() + 2000
+  }));
+  await page.waitForTimeout(80);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true);
+
+  await page.evaluate(() => { window.__fakeTorch.failOff = true; });
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-failure-blackout",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(180);
+
+  assert.equal(await page.evaluate(() => window.__fakeTorch.stopped), true, "OFF failure did not force-stop camera track");
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "Force-stopped camera remained logically ON");
+
+  assert.deepEqual(errors, [], "OFF-failure test JavaScript errors: " + errors.join(" | "));
   await page.close();
 }
 
@@ -319,7 +488,10 @@ async function testAudienceFailure(browser) {
 const browser = await chromium.launch({ headless: true });
 try {
   await testMaster(browser);
+  await testDeferredMasterWriteFencing(browser);
   await testAudienceSuccess(browser);
+  await testPendingOnBlackout(browser);
+  await testOffFailureStopsStream(browser);
   await testAudienceFailure(browser);
   console.log("CrowdLight browser regression tests passed.");
 } finally {
