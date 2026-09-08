@@ -90,8 +90,13 @@ final class MIDIManager: ObservableObject {
             )
         }
 
-        DispatchQueue.main.async {
-            self.sources = discovered.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let sorted = discovered.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        if Thread.isMainThread {
+            self.sources = sorted
+        } else {
+            DispatchQueue.main.async {
+                self.sources = sorted
+            }
         }
     }
 
