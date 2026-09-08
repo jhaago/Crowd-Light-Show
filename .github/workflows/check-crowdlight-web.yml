@@ -1,0 +1,75 @@
+name: Check CrowdLight Web
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'index.html'
+      - '.github/workflows/check-crowdlight-web.yml'
+
+jobs:
+  web-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Extract module JavaScript
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, sys
+
+          html = Path("index.html").read_text(encoding="utf-8")
+          match = re.search(r'<script\s+type="module">([\s\S]*?)</script>', html)
+          if not match:
+              sys.exit("Could not find the CrowdLight module script.")
+          Path("/tmp/crowdlight.mjs").write_text(match.group(1), encoding="utf-8")
+          PY
+
+      - name: JavaScript syntax check
+        run: node --check /tmp/crowdlight.mjs
+
+      - name: CrowdLight DOM and selector checks
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, sys
+
+          html = Path("index.html").read_text(encoding="utf-8")
+          script = Path("/tmp/crowdlight.mjs").read_text(encoding="utf-8")
+          errors = []
+
+          ids = re.findall(r'\bid="([^"]+)"', html)
+          duplicates = sorted({x for x in ids if ids.count(x) > 1})
+          if duplicates:
+              errors.append("Duplicate HTML id(s): " + ", ".join(duplicates))
+
+          id_set = set(ids)
+          refs = set(re.findall(r"\$\('#([A-Za-z0-9_-]+)'\)", script))
+          missing = sorted(refs - id_set)
+          if missing:
+              errors.append("Script references missing element id(s): " + ", ".join(missing))
+
+          # Regression guard for the exact bug that broke master controls in v0.7.
+          single_for_each = re.findall(r"(?<!\$)\$\([^\n;]*?\)\.forEach", script)
+          if single_for_each:
+              errors.append("Single-element $() selector used with .forEach(). Use $$() instead.")
+
+          if "$$$(" in script:
+              errors.append("Invalid $$$() selector found.")
+
+          required = [
+              "blackout", "steady", "flash", "pattern",
+              "unison", "twinkle", "sparkle", "constellation"
+          ]
+          absent = [x for x in required if x not in script.lower()]
+          if absent:
+              errors.append("Expected command/effect protocol strings missing: " + ", ".join(absent))
+
+          if errors:
+              print("\n".join("ERROR: " + e for e in errors))
+              sys.exit(1)
+
+          print(f"Web checks passed: {len(ids)} element IDs, {len(refs)} literal ID references.")
+          PY
