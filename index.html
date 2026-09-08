@@ -298,7 +298,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.7.3 • server clock fix</div>
+  <div class="footer">CrowdLight prototype v0.8.0 • fail-safe hardening</div>
 </div>
 
 <script type="module">
@@ -338,6 +338,13 @@ let localChannel = null;
 let patternTimer = null;
 let patternStopTimer = null;
 let lastCommandId = '';
+let audienceCommandVersion = 0;
+let audienceSessionVersion = 0;
+let activeAudienceCommand = null;
+let desiredTorchOn = false;
+let torchQueue = Promise.resolve(true);
+let lastTorchOnMono = -Infinity;
+const MIN_FLASH_GAP_MS = 1000 / MAX_FLASH_HZ;
 let currentMasterCommand = null;
 let keepAliveTimer = null;
 let masterActionVersion = 0;
@@ -361,6 +368,7 @@ let audioCtx = null, micStream = null, analyser = null, audioRAF = 0;
 let freqData = null, energyHistory = [], onsetTimes = [], lastOnset = 0;
 let detectedPeriod = 0, detectedConfidence = 0, musicSyncRunning = false;
 let beatCounter = 0, lastMusicPublish = 0;
+let musicManualBlockUntil = 0;
 
 function normalizeDb(url){
   return (url || '').trim().replace(/\/+$/,'');
@@ -463,8 +471,21 @@ async function requestTorch(){
   }
 
   async function adoptCandidate(s){
+    audienceSessionVersion++;
+    audienceCommandVersion++;
+    activeAudienceCommand=null;
+    desiredTorchOn=false;
+    torchOn=false;
+    torchQueue=Promise.resolve(true);
     stream=s;
     track=s.getVideoTracks()[0];
+    const adoptedTrack=track;
+    adoptedTrack.addEventListener?.('ended',()=>{
+      if(track===adoptedTrack) handleCameraLost('Camera/flashlight stream ended.');
+    });
+    adoptedTrack.addEventListener?.('mute',()=>{
+      if(track===adoptedTrack) handleCameraLost('Camera/flashlight stream was interrupted.');
+    });
     $('#hiddenVideo').srcObject=s;
     try{ await $('#hiddenVideo').play(); }catch(e){}
     torchAvailable=true;
@@ -529,46 +550,156 @@ async function requestTorch(){
     : '\n\nTry opening the link directly in the latest Google Chrome rather than an in-app browser.';
   throw new Error('I tested '+Math.max(tried,1)+' camera input'+(tried===1?'':'s')+' on this phone, but none explicitly reported flashlight support.'+browserHint);
 }
-async function setTorch(on){
-  if(!track || track.readyState !== 'live') return false;
-  on = !!on;
-  if(torchOn === on) return true;
-
+async function applyTorchConstraint(trackRef,on){
+  if(!trackRef || trackRef.readyState!=='live') return false;
   try{
-    await track.applyConstraints({advanced:[{torch:on}]});
+    await trackRef.applyConstraints({advanced:[{torch:!!on}]});
   }catch(e1){
     try{
-      await track.applyConstraints({torch:on});
+      await trackRef.applyConstraints({torch:!!on});
     }catch(e2){
       return false;
     }
   }
 
-  // If the browser exposes actual torch state, require it to match.
   try{
-    const settings=track.getSettings ? track.getSettings() : {};
-    if(Object.prototype.hasOwnProperty.call(settings,'torch') && settings.torch !== on){
+    const settings=trackRef.getSettings ? trackRef.getSettings() : {};
+    if(Object.prototype.hasOwnProperty.call(settings,'torch') && settings.torch !== !!on){
       return false;
     }
   }catch(e){}
-
-  torchOn = on;
-  $('#flashOverlay').classList.toggle('show', on);
   return true;
 }
-async function flashTorch(ms=90){
-  await setTorch(true);
-  await sleep(ms);
-  await setTorch(false);
-}
-async function releaseTorch(){
-  clearPattern();
-  try{ await setTorch(false); }catch(e){}
-  if(track) try{track.stop()}catch(e){}
-  if(stream) stream.getTracks().forEach(t=>{try{t.stop()}catch(e){}});
-  track=null; stream=null; torchOn=false;
-  try{ if(wakeLock) await wakeLock.release(); }catch(e){}
+
+function stopTorchStreamNow(reason=''){
+  audienceSessionVersion++;
+  audienceCommandVersion++;
+  activeAudienceCommand=null;
+  desiredTorchOn=false;
+  clearAudienceTimers();
+  const oldTrack=track;
+  const oldStream=stream;
+  track=null;
+  stream=null;
+  torchOn=false;
+  torchAvailable=false;
+  torchQueue=Promise.resolve(true);
+  $('#flashOverlay').classList.remove('show');
+  try{ oldTrack?.stop() }catch(e){}
+  try{ oldStream?.getTracks?.().forEach(t=>{try{t.stop()}catch(e){}}) }catch(e){}
+  try{ if(wakeLock) wakeLock.release().catch(()=>{}) }catch(e){}
   wakeLock=null;
+
+  if(reason && !$('#readyCard')?.classList.contains('hidden')){
+    $('#audienceTorch').textContent='LOST';
+    $('#readyMessage').textContent=reason+' Re-enable your flashlight to rejoin.';
+    $('#audienceConnDot').className='dot warn';
+    $('#audienceConn').textContent='FLASHLIGHT LOST';
+    setNet('Flashlight unavailable','warn');
+  }
+}
+
+function handleCameraLost(reason){
+  if(!track) return;
+  // Stopping the stream is the strongest browser-level fallback we have when
+  // the camera/torch becomes unreliable.
+  stopTorchStreamNow(reason);
+}
+
+async function reconcileTorch(sessionToken, ratePolicy='delay'){
+  for(let attempts=0; attempts<6; attempts++){
+    if(sessionToken!==audienceSessionVersion) return false;
+    const trackRef=track;
+    if(!trackRef || trackRef.readyState!=='live') return false;
+
+    const wanted=!!desiredTorchOn;
+    if(torchOn===wanted) return true;
+
+    if(wanted){
+      const gap=performance.now()-lastTorchOnMono;
+      if(gap < MIN_FLASH_GAP_MS){
+        if(ratePolicy==='drop') return false;
+        await sleep(MIN_FLASH_GAP_MS-gap);
+        if(sessionToken!==audienceSessionVersion || !desiredTorchOn) continue;
+      }
+    }
+
+    const ok=await applyTorchConstraint(trackRef,wanted);
+
+    // If this operation belonged to an old stream/session, make a best-effort
+    // OFF request against the captured track and never update current state.
+    if(sessionToken!==audienceSessionVersion || trackRef!==track){
+      if(wanted){
+        try{ await applyTorchConstraint(trackRef,false) }catch(e){}
+        try{ trackRef.stop() }catch(e){}
+      }
+      return false;
+    }
+
+    if(!ok){
+      if(!wanted){
+        stopTorchStreamNow('CrowdLight could not confirm that the flashlight switched off.');
+      }
+      return false;
+    }
+
+    torchOn=wanted;
+    $('#flashOverlay').classList.toggle('show',wanted);
+    if(wanted) lastTorchOnMono=performance.now();
+
+    // The desired state may have changed while applyConstraints() was pending.
+    // Loop immediately so a newer BLACKOUT/OFF always wins.
+    if(torchOn===desiredTorchOn) return true;
+  }
+  return torchOn===desiredTorchOn;
+}
+
+function setTorch(on,{ratePolicy='delay'}={}){
+  desiredTorchOn=!!on;
+  const sessionToken=audienceSessionVersion;
+  const previous=torchQueue;
+  torchQueue=previous.catch(()=>false).then(()=>reconcileTorch(sessionToken,ratePolicy));
+  return torchQueue;
+}
+
+async function flashTorch(ms=90,isCurrent=()=>true){
+  if(!isCurrent()) return false;
+  const onOk=await setTorch(true,{ratePolicy:'drop'});
+  if(!onOk || !isCurrent()) return false;
+
+  await sleep(ms);
+  if(!isCurrent()) return false;
+
+  return setTorch(false);
+}
+
+async function releaseTorch(){
+  // Invalidate all command callbacks before touching the hardware.
+  audienceCommandVersion++;
+  activeAudienceCommand=null;
+  clearAudienceTimers();
+  desiredTorchOn=false;
+
+  const offPromise=setTorch(false);
+  const offOk=await Promise.race([
+    offPromise.catch(()=>false),
+    sleep(450).then(()=>false)
+  ]);
+
+  if(!offOk && track){
+    stopTorchStreamNow('Flashlight stream was force-stopped during cleanup.');
+  }else{
+    const oldTrack=track;
+    const oldStream=stream;
+    audienceSessionVersion++;
+    torchQueue=Promise.resolve(true);
+    try{ oldTrack?.stop() }catch(e){}
+    try{ oldStream?.getTracks?.().forEach(t=>{try{t.stop()}catch(e){}}) }catch(e){}
+    track=null; stream=null; torchOn=false; torchAvailable=false; desiredTorchOn=false;
+    $('#flashOverlay').classList.remove('show');
+    try{ if(wakeLock) await wakeLock.release(); }catch(e){}
+    wakeLock=null;
+  }
 }
 async function requestWakeLock(){
   try{
@@ -582,9 +713,17 @@ async function requestWakeLock(){
   }catch(e){ wakeLock=null; }
 }
 document.addEventListener('visibilitychange', async()=>{
+  if(document.visibilityState === 'hidden'){
+    failSafeAudienceOff('CrowdLight paused while this page is in the background.');
+    return;
+  }
   if(document.visibilityState === 'visible' && track && !wakeLock) requestWakeLock();
 });
-window.addEventListener('pagehide', ()=>{ setTorch(false); });
+window.addEventListener('pagehide', ()=>{
+  // pagehide may be the last JavaScript we receive. Stop the camera stream
+  // synchronously rather than trusting a pending async OFF constraint.
+  stopTorchStreamNow();
+});
 
 // ---------------- NETWORK ----------------
 async function ensureFirebase(){
@@ -747,12 +886,17 @@ async function pushRemoteCommand(cmd){
   }
 }
 
-async function publishCommand(cmd, {keep=false}={}){
-  if(!cmd.id) cmd.id = uid();
-  try{ localChannel?.postMessage({type:'command',command:cmd}); }catch(e){}
-  const remoteOk = await pushRemoteCommand(cmd);
+async function publishCommand(cmd,{keep=false,actionVersion=masterActionVersion}={}){
+  if(!cmd.id) cmd.id=uid();
 
-  if(IS_MASTER){
+  if(actionVersion===masterActionVersion){
+    try{ localChannel?.postMessage({type:'command',command:cmd}); }catch(e){}
+  }
+
+  const remoteOk=await pushRemoteCommand(cmd);
+  const stillCurrent=actionVersion===masterActionVersion;
+
+  if(IS_MASTER && stillCurrent){
     if(remoteOk){
       $('#dbDot').className='dot good';
       $('#dbState').textContent=firebaseConnected?'CONNECTED':'WRITE OK';
@@ -760,25 +904,31 @@ async function publishCommand(cmd, {keep=false}={}){
     log(`${cmd.mode.toUpperCase()} sent${dbUrl ? (remoteOk?' to Firebase':' (Firebase failed)') : ' locally'}.`);
   }
 
-  if(keep){
-    currentMasterCommand = cmd;
-    resetKeepAlive();
-  }else if(cmd.mode==='off'){
-    currentMasterCommand = null;
+  // A superseded or failed publish must never recreate persistent state.
+  if(keep && stillCurrent && remoteOk){
+    currentMasterCommand=cmd;
+    resetKeepAlive(actionVersion);
+  }else if(cmd.mode==='off' && stillCurrent){
+    currentMasterCommand=null;
     clearInterval(keepAliveTimer);
     keepAliveTimer=null;
   }
   return remoteOk;
 }
 
-function resetKeepAlive(){
+function resetKeepAlive(actionVersion=masterActionVersion){
   clearInterval(keepAliveTimer);
   keepAliveTimer=setInterval(async()=>{
-    if(!currentMasterCommand) return;
-    const c={...currentMasterCommand,id:uid(),validUntil:nowServer()+COMMAND_TTL};
+    if(actionVersion!==masterActionVersion || !currentMasterCommand) return;
+    const c={...currentMasterCommand,id:uid(),issuedAt:nowServer(),validUntil:nowServer()+COMMAND_TTL};
     currentMasterCommand=c;
     try{ localChannel?.postMessage({type:'command',command:c}); }catch(e){}
-    await pushRemoteCommand(c);
+    const ok=await pushRemoteCommand(c);
+    if(actionVersion!==masterActionVersion) return;
+    if(!ok){
+      $('#dbDot').className='dot warn';
+      $('#dbState').textContent='WRITE FAILED';
+    }
   },REFRESH_MS);
 }
 
@@ -825,58 +975,185 @@ async function connectRemoteAudience(){
 }
 
 // ---------------- AUDIENCE COMMAND ENGINE ----------------
-function clearPattern(){
+function clearAudienceTimers(){
   if(patternTimer){ clearTimeout(patternTimer); patternTimer=null; }
   if(patternStopTimer){ clearTimeout(patternStopTimer); patternStopTimer=null; }
 }
-function safetyExpiry(validUntil){
-  if(patternStopTimer) clearTimeout(patternStopTimer);
-  if(!validUntil) return;
-  const delay = Math.max(0, validUntil - nowServer());
-  patternStopTimer = setTimeout(()=>{ clearPattern(); setTorch(false); }, delay+80);
+
+function clearPattern(){
+  clearAudienceTimers();
 }
-function receiveCommand(cmd, source){
-  if(!cmd || !cmd.mode || !track) return;
-  if(cmd.id && cmd.id===lastCommandId) return;
+
+function failSafeAudienceOff(reason=''){
+  audienceCommandVersion++;
+  activeAudienceCommand=null;
+  clearAudienceTimers();
+  desiredTorchOn=false;
+  setTorch(false).then(ok=>{
+    if(!ok && track) stopTorchStreamNow(reason || 'CrowdLight could not establish a safe OFF state.');
+  }).catch(()=>{
+    if(track) stopTorchStreamNow(reason || 'CrowdLight could not establish a safe OFF state.');
+  });
+  if(reason && !$('#readyCard')?.classList.contains('hidden')){
+    $('#readyMessage').textContent=reason;
+  }
+}
+
+function validateCommand(cmd){
+  if(!cmd || typeof cmd!=='object') return {ok:false,reason:'Missing command'};
+  const mode=cmd.mode;
+  if(!['off','steady','flash','pattern'].includes(mode)) return {ok:false,reason:'Unknown command mode'};
+  if(cmd.room && cleanRoom(String(cmd.room))!==room) return {ok:false,reason:'Wrong room'};
+
+  const validUntil=Number(cmd.validUntil);
   const now=nowServer();
-  if(cmd.validUntil && now > cmd.validUntil + 500) return;
-  // A late one-shot flash is visually worse than missing it. Phones that
-  // reconnect well after the scheduled instant should not fire randomly.
-  if(cmd.mode==='flash' && cmd.startAt && now > Number(cmd.startAt)+500) return;
-  lastCommandId = cmd.id || '';
-  $('#readyMessage').textContent = source==='firebase' ? 'Connected to the live show.' : 'Receiving '+(source==='test'?'browser test':'local test')+' commands.';
+  if(!Number.isFinite(validUntil)) return {ok:false,reason:'Missing command expiry'};
+  if(validUntil < now-500) return {ok:false,reason:'Expired command'};
+  if(validUntil > now+120000) return {ok:false,reason:'Command expiry is too far in the future'};
+
+  if(mode==='steady' || mode==='flash' || mode==='pattern'){
+    const startAt=Number(cmd.startAt);
+    if(!Number.isFinite(startAt)) return {ok:false,reason:'Missing start time'};
+    if(startAt > now+30000) return {ok:false,reason:'Start time is too far in the future'};
+  }
+
+  if(mode==='flash'){
+    const flashMs=Number(cmd.flashMs);
+    if(!Number.isFinite(flashMs) || flashMs<35 || flashMs>250) return {ok:false,reason:'Invalid flash duration'};
+  }
+
+  if(mode==='pattern'){
+    const bpm=Number(cmd.bpm);
+    const div=Number(cmd.division);
+    const phase=Number(cmd.phaseStart ?? cmd.startAt);
+    if(!Number.isFinite(bpm) || bpm<30 || bpm>240) return {ok:false,reason:'Invalid BPM'};
+    if(![1,2,4].includes(div)) return {ok:false,reason:'Invalid beat division'};
+    if(!Number.isFinite(phase)) return {ok:false,reason:'Invalid pattern phase'};
+    if(!['unison','twinkle','sparkle','constellation'].includes(cmd.effect)) return {ok:false,reason:'Invalid effect'};
+    const flashMs=Number(cmd.flashMs);
+    if(!Number.isFinite(flashMs) || flashMs<35 || flashMs>250) return {ok:false,reason:'Invalid flash duration'};
+  }
+
+  return {ok:true};
+}
+
+function samePersistentLease(cmd){
+  const a=activeAudienceCommand;
+  if(!a || a.token!==audienceCommandVersion || a.mode!==cmd.mode) return false;
+  if(cmd.mode==='steady') return true;
+  if(cmd.mode!=='pattern') return false;
+  return Number(a.phaseStart)===Number(cmd.phaseStart) &&
+    Number(a.bpm)===Number(cmd.bpm) &&
+    Number(a.division)===Number(cmd.division) &&
+    Number(a.flashMs)===Number(cmd.flashMs) &&
+    a.effect===cmd.effect;
+}
+
+function armSafetyExpiry(validUntil,token){
+  if(patternStopTimer) clearTimeout(patternStopTimer);
+  const delay=Math.max(0,Number(validUntil)-nowServer());
+  patternStopTimer=setTimeout(()=>{
+    if(token!==audienceCommandVersion) return;
+    failSafeAudienceOff('The show command expired. Waiting for the controller…');
+  },delay+80);
+}
+
+function commandStillCurrent(token,{oneShot=false}={}){
+  if(token!==audienceCommandVersion) return false;
+  if(!activeAudienceCommand || activeAudienceCommand.token!==token) return false;
+  if(!track || track.readyState!=='live') return false;
+  if(document.visibilityState==='hidden') return false;
+  const now=nowServer();
+  if(now > Number(activeAudienceCommand.validUntil)+80) return false;
+  if(oneShot && now > Number(activeAudienceCommand.startAt)+500) return false;
+  return true;
+}
+
+function receiveCommand(cmd,source){
+  if(!track) return;
+
+  const validity=validateCommand(cmd);
+  if(!validity.ok){
+    failSafeAudienceOff('Invalid or stale show command. Waiting for a fresh controller command…');
+    return;
+  }
+
+  if(document.visibilityState==='hidden'){
+    failSafeAudienceOff('CrowdLight paused while this page is in the background.');
+    return;
+  }
+
+  if(cmd.id && cmd.id===lastCommandId) return;
+  lastCommandId=cmd.id || '';
+
+  // Heartbeats extend the lease of an unchanged steady/pattern command without
+  // tearing down and rebuilding its local scheduler.
+  if((cmd.mode==='steady' || cmd.mode==='pattern') && samePersistentLease(cmd)){
+    activeAudienceCommand={...activeAudienceCommand,...cmd,token:audienceCommandVersion};
+    armSafetyExpiry(cmd.validUntil,audienceCommandVersion);
+    $('#readyMessage').textContent=source==='firebase'?'Connected to the live show.':'Receiving '+(source==='test'?'browser test':'local test')+' commands.';
+    return;
+  }
+
+  $('#readyMessage').textContent=source==='firebase'?'Connected to the live show.':'Receiving '+(source==='test'?'browser test':'local test')+' commands.';
   executeCommand(cmd);
 }
-async function executeCommand(cmd){
-  clearPattern();
-  const mode = cmd.mode;
-  if(mode==='off'){
-    await setTorch(false);
+
+function executeCommand(cmd){
+  clearAudienceTimers();
+  const token=++audienceCommandVersion;
+  activeAudienceCommand={...cmd,token};
+
+  if(cmd.mode==='off'){
+    activeAudienceCommand=null;
+    desiredTorchOn=false;
+    setTorch(false).then(ok=>{
+      if(!ok && track) stopTorchStreamNow('CrowdLight could not confirm BLACKOUT.');
+    });
     return;
   }
-  safetyExpiry(cmd.validUntil);
-  if(mode==='steady'){
-    const delay = Math.max(0,(cmd.startAt||nowServer())-nowServer());
-    patternTimer=setTimeout(()=>setTorch(true),delay);
+
+  armSafetyExpiry(cmd.validUntil,token);
+
+  if(cmd.mode==='steady'){
+    const delay=Math.max(0,Number(cmd.startAt)-nowServer());
+    patternTimer=setTimeout(async()=>{
+      if(!commandStillCurrent(token)) return;
+      await setTorch(true,{ratePolicy:'delay'});
+    },delay);
     return;
   }
-  if(mode==='flash'){
-    const delay=Math.max(0,(cmd.startAt||nowServer())-nowServer());
-    patternTimer=setTimeout(()=>flashTorch(Math.min(250,Math.max(35,cmd.flashMs||90))),delay);
+
+  // Patterns and one-shots should begin from OFF. This also makes a SYNC FLASH
+  // visually distinct when replacing a previously steady state.
+  desiredTorchOn=false;
+  setTorch(false).catch(()=>{});
+
+  if(cmd.mode==='flash'){
+    const delay=Math.max(0,Number(cmd.startAt)-nowServer());
+    const flashMs=Math.min(250,Math.max(35,Number(cmd.flashMs)));
+    patternTimer=setTimeout(async()=>{
+      if(!commandStillCurrent(token,{oneShot:true})) return;
+      await flashTorch(flashMs,()=>commandStillCurrent(token,{oneShot:true}));
+      if(token===audienceCommandVersion) activeAudienceCommand=null;
+    },delay);
     return;
   }
-  if(mode==='pattern'){
-    const bpm=Math.max(30,Math.min(240,Number(cmd.bpm)||120));
-    const div=Math.max(1,Number(cmd.division)||1);
-    const rawPeriod=(60000/bpm)*div;
-    const period=Math.max(1000/MAX_FLASH_HZ,rawPeriod);
-    const effect=['unison','twinkle','sparkle','constellation'].includes(cmd.effect)?cmd.effect:'unison';
-    let flashMs=Math.min(250,Math.max(35,Number(cmd.flashMs)||90));
+
+  if(cmd.mode==='pattern'){
+    const bpm=Number(cmd.bpm);
+    const div=Number(cmd.division);
+    // Keep the true musical grid. The global physical ON limiter below skips
+    // flashes when necessary rather than inventing a non-musical 500 ms grid.
+    const period=(60000/bpm)*div;
+    const effect=cmd.effect;
+    let flashMs=Math.min(250,Math.max(35,Number(cmd.flashMs)));
     if(effect==='sparkle') flashMs=Math.min(flashMs,65);
     if(effect==='twinkle') flashMs=Math.min(flashMs,110);
-    const phase=Number(cmd.phaseStart||cmd.startAt||nowServer());
+    const phase=Number(cmd.phaseStart);
 
     const scheduleNext=()=>{
+      if(!commandStillCurrent(token)) return;
       const now=nowServer();
       let n=Math.ceil((now-phase)/period);
       if(!Number.isFinite(n)||n<0)n=0;
@@ -884,9 +1161,16 @@ async function executeCommand(cmd){
       const delay=Math.max(0,target-now);
 
       patternTimer=setTimeout(async()=>{
+        if(!commandStillCurrent(token)) return;
+
         if(effectShouldFlash(effect,n)){
-          await flashTorch(flashMs);
+          // flashTorch's final ON transition enforces the global 2 Hz ceiling.
+          // If a beat is too close to the previous physical flash, that beat is
+          // skipped rather than delayed off the musical grid.
+          await flashTorch(flashMs,()=>commandStillCurrent(token));
         }
+
+        if(!commandStillCurrent(token)) return;
         scheduleNext();
       },delay);
     };
@@ -944,7 +1228,7 @@ function initAudience(){
       alert(e.message + '\n\nTry the latest Safari/Chrome on a phone with a rear flashlight, and make sure camera permission is allowed.');
     }
   };
-  $('#testBtn').onclick=()=>flashTorch(130);
+  $('#testBtn').onclick=()=>flashTorch(130,()=>!!track && document.visibilityState!=='hidden');
   $('#leaveBtn').onclick=async()=>{
     if(commandSource) try{commandSource()}catch(e){}
     commandSource=null;
@@ -1036,13 +1320,12 @@ function commandBase(mode){
 }
 async function masterOff(){
   const actionVersion=beginMasterAction();
-  // Cancel the old repeating command BEFORE the network write. In v0.5 the
-  // keepalive could fire while BLACKOUT was being sent and overwrite it.
   currentMasterCommand=null;
   clearInterval(keepAliveTimer);
   keepAliveTimer=null;
 
   musicSyncRunning=false;
+  musicManualBlockUntil=Date.now()+1600;
   $('#musicSyncBtn').textContent='START MUSIC SYNC';
   $('#startBpmBtn').textContent='START BPM FLASHING';
   $('#masterModeText').textContent='BLACKOUT';
@@ -1050,12 +1333,12 @@ async function masterOff(){
   showCommandResult('Sending BLACKOUT…',true);
   markSent($('#blackoutBtn'));
 
-  const ok=await pushRemoteCommand({...commandBase('off'),validUntil:nowServer()+60000});
-  try{ localChannel?.postMessage({type:'command',command:{...commandBase('off'),validUntil:nowServer()+60000}}); }catch(e){}
+  const offCmd={...commandBase('off'),validUntil:nowServer()+60000};
+  try{ localChannel?.postMessage({type:'command',command:offCmd}); }catch(e){}
+  const ok=await pushRemoteCommand(offCmd);
+  if(masterActionVersion!==actionVersion) return;
   showCommandResult(ok?'BLACKOUT sent successfully.':'BLACKOUT failed to send.',ok);
 
-  // A second off write shortly afterwards also protects against an already
-  // in-flight stale keepalive from a previous mode.
   if(ok){
     setTimeout(()=>{
       if(masterActionVersion===actionVersion){
@@ -1066,7 +1349,7 @@ async function masterOff(){
 }
 
 async function masterOn(){
-  beginMasterAction();
+  const actionVersion=beginMasterAction();
   musicSyncRunning=false;
   $('#musicSyncBtn').textContent='START MUSIC SYNC';
   $('#startBpmBtn').textContent='START BPM FLASHING';
@@ -1075,14 +1358,17 @@ async function masterOn(){
   setMasterState('on','ALL LIGHTS ON','Audience flashlights are commanded to remain on.','●');
   showCommandResult('Sending ALL LIGHTS ON…',true);
   markSent($('#allOnBtn'));
-  const ok=await publishCommand(cmd,{keep:true});
-  showCommandResult(ok?'ALL LIGHTS ON sent successfully.':'ALL LIGHTS ON failed to reach Firebase.',ok);
+  const ok=await publishCommand(cmd,{keep:true,actionVersion});
+  if(masterActionVersion===actionVersion){
+    showCommandResult(ok?'ALL LIGHTS ON sent successfully.':'ALL LIGHTS ON failed to reach Firebase.',ok);
+  }
 }
 
 async function masterFlash(){
   const actionVersion=beginMasterAction();
   const previous=currentMasterCommand ? {...currentMasterCommand} : null;
   const previousMusic=musicSyncRunning;
+  musicManualBlockUntil=Date.now()+1700;
 
   // Pause the persistent keepalive so it cannot overwrite the one-shot flash.
   clearInterval(keepAliveTimer);
@@ -1095,9 +1381,11 @@ async function masterFlash(){
   setMasterState('flash','SYNC FLASH SENT',`One ${cmd.flashMs} ms flash is scheduled across the crowd.`,'✦');
   showCommandResult('Scheduling synchronized flash…',true);
   markSent($('#flashNowBtn'));
-  const ok=await pushRemoteCommand(cmd);
   try{ localChannel?.postMessage({type:'command',command:cmd}); }catch(e){}
-  showCommandResult(ok?'SYNC FLASH sent successfully.':'SYNC FLASH failed to send.',ok);
+  const ok=await pushRemoteCommand(cmd);
+  if(masterActionVersion===actionVersion){
+    showCommandResult(ok?'SYNC FLASH sent successfully.':'SYNC FLASH failed to send.',ok);
+  }
 
   // Restore the previous persistent mode only if no newer operator command
   // has happened since this flash was fired.
@@ -1106,10 +1394,8 @@ async function masterFlash(){
 
     if(previous){
       const restore={...previous,id:uid(),issuedAt:nowServer(),validUntil:nowServer()+COMMAND_TTL};
-      currentMasterCommand=restore;
-      resetKeepAlive();
-      try{ localChannel?.postMessage({type:'command',command:restore}); }catch(e){}
-      await pushRemoteCommand(restore);
+      const restoredOk=await publishCommand(restore,{keep:true,actionVersion});
+      if(masterActionVersion!==actionVersion || !restoredOk) return;
 
       if(previous.mode==='steady'){
         setMasterState('on','ALL LIGHTS ON','Audience flashlights are commanded to remain on.','●');
@@ -1127,15 +1413,18 @@ async function masterFlash(){
   },1250);
 }
 
-async function masterPattern(phaseWall=0, bpmOverride=0){
-  beginMasterAction();
+async function masterPattern(phaseWall=0,bpmOverride=0,phaseServerOverride=0){
+  const actionVersion=beginMasterAction();
   let bpm=bpmOverride || +$('#bpmRange').value;
   const flashMs=+$('#flashMsRange').value;
-  const actualPeriod=Math.max(1000/MAX_FLASH_HZ,(60000/bpm)*division);
+  const musicalPeriod=(60000/bpm)*division;
   let phaseStart;
-  if(phaseWall){
+  if(phaseServerOverride){
+    phaseStart=Number(phaseServerOverride);
+    while(phaseStart < nowServer()+1100) phaseStart += musicalPeriod;
+  }else if(phaseWall){
     phaseStart=phaseWall+serverOffset;
-    while(phaseStart < nowServer()+1100) phaseStart += actualPeriod;
+    while(phaseStart < nowServer()+1100) phaseStart += musicalPeriod;
   }else{
     phaseStart=nowServer()+1200;
   }
@@ -1153,8 +1442,10 @@ async function masterPattern(phaseWall=0, bpmOverride=0){
   }
   showCommandResult('Starting synchronized pattern…',true);
   markSent(musicSyncRunning?$('#musicSyncBtn'):$('#startBpmBtn'));
-  const ok=await publishCommand(cmd,{keep:true});
-  showCommandResult(ok?'Pattern is live.':'Pattern failed to reach Firebase.',ok);
+  const ok=await publishCommand(cmd,{keep:true,actionVersion});
+  if(masterActionVersion===actionVersion){
+    showCommandResult(ok?'Pattern is live.':'Pattern failed to reach Firebase.',ok);
+  }
 }
 function effectLabel(effect){
   return ({unison:'Unison',twinkle:'Twinkle',sparkle:'Sparkle',constellation:'Constellation'})[effect] || 'Unison';
@@ -1174,15 +1465,15 @@ function setEffect(effect){
   // If an effect is already running, switch texture while preserving the musical mode.
   if(currentMasterCommand?.mode==='pattern'){
     const bpm=Number(currentMasterCommand.bpm)||+$('#bpmRange').value;
-    const phaseWall=musicSyncRunning && lastOnset ? lastOnset : Date.now();
-    masterPattern(phaseWall,bpm);
+    const phaseWall=musicSyncRunning && lastOnset ? lastOnset : 0;
+    masterPattern(phaseWall,bpm,currentMasterCommand.phaseStart||0);
   }
 }
 function refreshActivePatternFromControls(){
   if(currentMasterCommand?.mode!=='pattern') return;
   const bpm=(musicSyncRunning && detectedPeriod) ? 60000/detectedPeriod : +$('#bpmRange').value;
-  const phaseWall=(musicSyncRunning && lastOnset) ? lastOnset : Date.now();
-  masterPattern(phaseWall,bpm);
+  const phaseWall=(musicSyncRunning && lastOnset) ? lastOnset : 0;
+  masterPattern(phaseWall,bpm,currentMasterCommand.phaseStart||0);
 }
 function setDivision(d){
   division=+d;
@@ -1357,7 +1648,7 @@ function registerOnset(now,energy,avg,sd){
     $('#detectedBpm').textContent=Math.round(bpm);
     $('#confidence').textContent=detectedConfidence+'%';
 
-    if(musicSyncRunning && detectedConfidence>=45 && now-lastMusicPublish>1100){
+    if(musicSyncRunning && detectedConfidence>=45 && now-lastMusicPublish>1100 && now>=musicManualBlockUntil){
       lastMusicPublish=now;
       $('#bpmRange').value=Math.round(bpm); updateRhythmReadouts();
       masterPattern(now,bpm);
