@@ -769,7 +769,7 @@ function clearFirebaseInfo(){
 async function watchFirebaseInfo(){
   if(TEST_MODE){
     firebaseConnected=true;
-    serverClockReady=false;
+    updateServerClock(0);
     if(IS_MASTER){
       $('#dbDot').className='dot good';
       $('#dbState').textContent='TEST HARNESS';
@@ -816,6 +816,7 @@ async function watchFirebaseInfo(){
       $('#offsetState').textContent=(serverOffset>=0?'+':'')+Math.round(serverOffset)+' ms';
     }
   }, err=>{
+    serverClockReady=false;
     if(IS_MASTER){
       $('#offsetDot').className='dot warn';
       $('#offsetState').textContent='UNAVAILABLE';
@@ -825,7 +826,7 @@ async function watchFirebaseInfo(){
 
 async function getServerOffset(){
   if(TEST_MODE){ updateServerClock(0); return 0; }
-  if(!dbUrl){ serverOffset=0; return 0; }
+  if(!dbUrl){ serverOffset=0; serverClockReady=false; return 0; }
 
   try{
     if(!await ensureFirebase()) return 0;
@@ -870,6 +871,7 @@ async function getServerOffset(){
     return serverOffset;
   }catch(e){
     serverOffset=0;
+    serverClockReady=false;
     if(IS_MASTER){
       $('#offsetDot').className='dot warn';
       $('#offsetState').textContent='UNAVAILABLE';
