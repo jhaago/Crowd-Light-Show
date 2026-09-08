@@ -19,6 +19,7 @@ final class AppModel: ObservableObject {
     @Published var clockOffsetText: String = "—"
     @Published var currentState: String = "NO COMMAND SENT"
     @Published var lastCue: String = "No cue received"
+    @Published var midiLoopbackState: String = "Not tested"
     @Published var logs: [BridgeLogEntry] = []
 
     let cueMappings = CueMapping.defaults
@@ -32,6 +33,9 @@ final class AppModel: ObservableObject {
     private var actionVersion: UInt64 = 0
     private var controllerRevision: UInt64 = 0
     private let controllerID = "bridge-" + UUID().uuidString
+    private var midiLoopbackToken: UUID?
+    private var midiLoopbackExpectedChannel: Int?
+    private let midiLoopbackNote = 127
     private var hasStarted = false
 
     init() {
@@ -51,6 +55,9 @@ final class AppModel: ObservableObject {
         midi.onSourceLost = { [weak self] in
             guard let self else { return }
             self.externalCuesEnabled = false
+            self.midiLoopbackToken = nil
+            self.midiLoopbackExpectedChannel = nil
+            self.midiLoopbackState = "FAILED • MIDI source lost"
             self.log("MIDI source lost. External cues were automatically DISARMED.", success: false)
         }
 
@@ -102,6 +109,44 @@ final class AppModel: ObservableObject {
         log("MIDI source list refreshed.", success: nil)
     }
 
+    func testMIDILoopback() {
+        guard midi.connectedSourceID != 0 else {
+            midiLoopbackState = "FAILED • Select MIDI source"
+            log("MIDI loopback test could not start: no MIDI source selected.", success: false)
+            return
+        }
+
+        let token = UUID()
+        let channel = midiChannel
+        midiLoopbackToken = token
+        midiLoopbackExpectedChannel = channel
+        midiLoopbackState = "Testing…"
+        log("MIDI loopback: sending diagnostic Note \(midiLoopbackNote) on Ch \(channel).", success: nil)
+
+        switch midi.sendLoopbackTest(
+            note: midiLoopbackNote,
+            channel: channel,
+            velocity: 100
+        ) {
+        case .success(let destinationName):
+            log("MIDI loopback packet sent to \(destinationName). Waiting for CoreMIDI input…", success: nil)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                guard let self, self.midiLoopbackToken == token else { return }
+                self.midiLoopbackToken = nil
+                self.midiLoopbackExpectedChannel = nil
+                self.midiLoopbackState = "FAILED • No return received"
+                self.log("MIDI LOOPBACK FAILED: no diagnostic note returned through the selected IAC source.", success: false)
+            }
+
+        case .failure(let error):
+            midiLoopbackToken = nil
+            midiLoopbackExpectedChannel = nil
+            midiLoopbackState = "FAILED • Could not send"
+            log("MIDI LOOPBACK FAILED: \(error.localizedDescription)", success: false)
+        }
+    }
+
     func testFirebase() {
         firebaseState = "Testing…"
         firebaseConnected = false
@@ -142,6 +187,17 @@ final class AppModel: ObservableObject {
     }
 
     private func handleMIDI(note: Int, channel: Int, velocity: Int) {
+        if midiLoopbackToken != nil,
+           note == midiLoopbackNote,
+           channel == midiLoopbackExpectedChannel {
+            midiLoopbackToken = nil
+            midiLoopbackExpectedChannel = nil
+            midiLoopbackState = "PASSED • Note \(note) / Ch \(channel)"
+            lastCue = "MIDI LOOPBACK PASSED"
+            log("MIDI LOOPBACK PASSED: Note \(note) / Ch \(channel) returned through CoreMIDI.", success: true)
+            return
+        }
+
         guard channel == midiChannel else {
             log("Ignored MIDI note \(note) on channel \(channel) (CrowdLight listens on Ch \(midiChannel)).", success: nil)
             return
