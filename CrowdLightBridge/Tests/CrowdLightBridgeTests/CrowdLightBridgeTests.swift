@@ -84,21 +84,17 @@ final class CrowdLightBridgeTests: XCTestCase {
                 buffer.baseAddress!
             )
         }
-        XCTAssertNotNil(packet)
-
         let second: [UInt8] = [0x9F, 28, 80, 0x9F, 29, 70]
         second.withUnsafeBufferPointer { buffer in
             packet = MIDIPacketListAdd(
                 packetList,
                 capacity,
-                packet!,
+                packet,
                 200,
                 second.count,
                 buffer.baseAddress!
             )
         }
-        XCTAssertNotNil(packet)
-
         let payloads = MIDIManager.packetPayloads(
             packetList: UnsafePointer(packetList)
         )
