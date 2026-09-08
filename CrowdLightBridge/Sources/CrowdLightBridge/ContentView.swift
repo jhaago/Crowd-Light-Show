@@ -45,7 +45,7 @@ struct ContentView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
-                Text("v0.2")
+                Text("v0.3")
                     .font(.caption)
                     .fontWeight(.semibold)
                 Text("macOS 11+")
@@ -138,9 +138,23 @@ struct ContentView: View {
 
                 HStack(spacing: 10) {
                     Button("UNISON") { model.sendManual(.unison) }
+                    Button("SHIMMER") { model.sendManual(.shimmer) }
                     Button("TWINKLE") { model.sendManual(.twinkle) }
                     Button("SPARKLE") { model.sendManual(.sparkle) }
+                    Spacer()
+                }
+
+                HStack(spacing: 10) {
+                    Button("GLOW") { model.sendManual(.glow) }
+                    Button("FIREFLIES") { model.sendManual(.fireflies) }
+                    Button("ALTERNATE") { model.sendManual(.alternate) }
                     Button("CONSTELLATION") { model.sendManual(.constellation) }
+                    Spacer()
+                }
+
+                HStack(spacing: 10) {
+                    Button("BUILD") { model.sendManual(.build) }
+                    Button("DROP") { model.sendManual(.drop) }
                     Spacer()
                 }
             }
@@ -180,7 +194,7 @@ struct ContentView: View {
                     Button("Test Firebase") { model.testFirebase() }
                 }
 
-                Text("v0.2 uses the current Firebase test-mode database. Authentication will be added after the multi-device functional test.")
+                Text("v0.3 uses the current Firebase test-mode database. Authentication will be added after the multi-device functional test.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
