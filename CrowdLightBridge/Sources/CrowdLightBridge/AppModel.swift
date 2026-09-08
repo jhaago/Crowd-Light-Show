@@ -28,6 +28,7 @@ final class AppModel: ObservableObject {
     private var keepAliveTimer: Timer?
     private var persistentCommand: [String: Any]?
     private var persistentAction: CrowdAction?
+    private var restoreWorkItem: DispatchWorkItem?
 
     init() {
         let defaults = UserDefaults.standard
@@ -55,6 +56,7 @@ final class AppModel: ObservableObject {
 
     deinit {
         keepAliveTimer?.invalidate()
+        restoreWorkItem?.cancel()
     }
 
     func start() {
@@ -150,6 +152,11 @@ final class AppModel: ObservableObject {
     private func send(action: CrowdAction, source: String) {
         saveSettings()
 
+        // Any new operator or MIDI command cancels a delayed restore from a prior
+        // one-shot flash. This prevents a BLACKOUT from being undone later.
+        restoreWorkItem?.cancel()
+        restoreWorkItem = nil
+
         switch action {
         case .blackout:
             stopPersistentMode()
@@ -176,35 +183,53 @@ final class AppModel: ObservableObject {
         case .syncFlash:
             let previousCommand = persistentCommand
             let previousAction = persistentAction
+
+            // Pause the keepalive so it cannot overwrite the one-shot FLASH
+            // command before the audience phones execute it.
+            keepAliveTimer?.invalidate()
+            keepAliveTimer = nil
+
             var command = baseCommand(mode: "flash")
             command["startAt"] = firebase.estimatedServerNowMs() + 900
             command["flashMs"] = Int(flashMs)
             currentState = "SYNC FLASH"
             sendCommand(command, description: action.label, source: source)
 
-            if let previousCommand, let previousAction {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak self] in
-                    guard let self else { return }
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.restoreWorkItem = nil
+
+                if let previousCommand, let previousAction {
                     var restored = previousCommand
                     restored["id"] = UUID().uuidString
                     restored["issuedAt"] = self.firebase.estimatedServerNowMs()
                     restored["validUntil"] = self.firebase.estimatedServerNowMs() + 15_000
                     self.persistentCommand = restored
                     self.persistentAction = previousAction
-                    self.currentState = previousAction.label
+                    self.currentState = self.displayState(for: previousAction, command: restored)
+                    self.startKeepAliveTimer()
                     self.firebase.sendCommand(
                         databaseURL: self.databaseURL,
                         room: self.room,
                         command: restored
-                    ) { _ in }
-                }
-            } else {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak self] in
-                    if self?.persistentAction == nil {
-                        self?.currentState = "BLACKOUT"
+                    ) { result in
+                        if case .failure(let error) = result {
+                            DispatchQueue.main.async {
+                                self.firebaseConnected = false
+                                self.firebaseState = "Write failed"
+                                self.log("Restore after SYNC FLASH failed: \(error.localizedDescription)", success: false)
+                            }
+                        }
                     }
+                } else {
+                    self.persistentCommand = nil
+                    self.persistentAction = nil
+                    self.currentState = "BLACKOUT"
                 }
             }
+
+            restoreWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.3, execute: work)
 
         case .unison, .twinkle, .sparkle, .constellation:
             var command = baseCommand(mode: "pattern")
@@ -237,7 +262,11 @@ final class AppModel: ObservableObject {
         keepAliveTimer?.invalidate()
         persistentAction = action
         persistentCommand = command
+        startKeepAliveTimer()
+    }
 
+    private func startKeepAliveTimer() {
+        keepAliveTimer?.invalidate()
         keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self, var refreshed = self.persistentCommand else { return }
             refreshed["id"] = UUID().uuidString
@@ -260,9 +289,32 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func displayState(for action: CrowdAction, command: [String: Any]) -> String {
+        switch action {
+        case .allOn:
+            return "ALL LIGHTS ON"
+        case .unison, .twinkle, .sparkle, .constellation:
+            let commandBPM: Int
+            if let n = command["bpm"] as? NSNumber {
+                commandBPM = n.intValue
+            } else if let d = command["bpm"] as? Double {
+                commandBPM = Int(d)
+            } else {
+                commandBPM = Int(bpm)
+            }
+            return "\(action.label) • \(commandBPM) BPM"
+        case .blackout:
+            return "BLACKOUT"
+        case .syncFlash:
+            return "SYNC FLASH"
+        }
+    }
+
     private func stopPersistentMode() {
         keepAliveTimer?.invalidate()
         keepAliveTimer = nil
+        restoreWorkItem?.cancel()
+        restoreWorkItem = nil
         persistentCommand = nil
         persistentAction = nil
     }
