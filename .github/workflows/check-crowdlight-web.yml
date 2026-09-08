@@ -61,7 +61,8 @@ jobs:
 
           required = [
               "blackout", "steady", "flash", "pattern",
-              "unison", "twinkle", "sparkle", "constellation"
+              "unison", "shimmer", "twinkle", "sparkle", "glow",
+              "fireflies", "alternate", "constellation", "build", "drop"
           ]
           absent = [x for x in required if x not in script.lower()]
           if absent:
