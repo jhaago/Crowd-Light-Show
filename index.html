@@ -1,0 +1,848 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#05070b">
+<title>CrowdLight</title>
+<style>
+:root{
+  --bg:#05070b; --panel:#0d1119; --panel2:#121824; --line:#263044;
+  --text:#f6f8fb; --muted:#9aa8bb; --good:#43d17c; --warn:#ffbf47;
+  --danger:#ff4d5f; --accent:#7ca8ff; --accent2:#9b7cff;
+  --shadow:0 18px 60px rgba(0,0,0,.38);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;min-height:100%;background:radial-gradient(circle at 50% -20%,#19233a 0,#080b12 35%,var(--bg) 70%);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+body{min-height:100dvh;overflow-x:hidden}
+button,input,select{font:inherit}
+button{touch-action:manipulation}
+.shell{width:min(980px,100%);margin:auto;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:16px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:42px;height:42px;border-radius:14px;background:linear-gradient(145deg,#f8fbff,#8baeff);box-shadow:0 0 28px rgba(124,168,255,.22);display:grid;place-items:center;color:#05070b;font-weight:950;letter-spacing:-1px}
+.brandText b{font-size:18px;letter-spacing:.3px}.brandText span{display:block;color:var(--muted);font-size:12px;margin-top:1px}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:8px 11px;border:1px solid var(--line);border-radius:999px;background:rgba(13,17,25,.8);color:var(--muted);font-size:12px;font-weight:750}
+.dot{width:8px;height:8px;border-radius:50%;background:#586578;box-shadow:0 0 0 4px rgba(88,101,120,.12)}
+.dot.good{background:var(--good);box-shadow:0 0 0 4px rgba(67,209,124,.12)}
+.dot.warn{background:var(--warn);box-shadow:0 0 0 4px rgba(255,191,71,.12)}
+.card{background:linear-gradient(180deg,rgba(18,24,36,.96),rgba(11,15,23,.96));border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow);padding:20px}
+.card+.card{margin-top:14px}
+.hero{text-align:center;padding:34px 22px 28px}
+.heroIcon{width:92px;height:92px;border-radius:30px;margin:0 auto 20px;display:grid;place-items:center;background:radial-gradient(circle at 45% 38%,#fff 0,#c8d8ff 20%,#668fe8 57%,#24365f 100%);color:#09101e;font-size:42px;box-shadow:0 0 64px rgba(124,168,255,.28)}
+h1{font-size:clamp(31px,7vw,48px);line-height:1;margin:0 0 12px;letter-spacing:-1.8px}
+h2{font-size:18px;margin:0 0 4px}
+p{color:var(--muted);line-height:1.55;margin:0}
+.hero p{max-width:590px;margin:0 auto}
+.primary,.secondary,.dangerBtn,.ghost{border:0;border-radius:16px;min-height:54px;padding:0 18px;font-weight:850;letter-spacing:.15px;cursor:pointer;transition:transform .08s ease,filter .15s ease,opacity .15s ease}
+.primary:active,.secondary:active,.dangerBtn:active,.ghost:active{transform:scale(.975)}
+.primary{background:linear-gradient(135deg,#f7f9ff,#a9c3ff);color:#07101f;box-shadow:0 9px 28px rgba(124,168,255,.2)}
+.secondary{background:#182132;color:#eef3ff;border:1px solid #2c3850}
+.dangerBtn{background:linear-gradient(135deg,#ff6a77,#df263d);color:white;box-shadow:0 9px 28px rgba(255,77,95,.18)}
+.ghost{background:transparent;color:#c8d3e5;border:1px solid var(--line)}
+.big{width:100%;min-height:64px;font-size:17px}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}.actions>*{flex:1 1 170px}
+.statusBox{margin-top:18px;padding:14px 16px;border-radius:16px;border:1px solid var(--line);background:#0a0e15;text-align:left}
+.statusLine{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:750}
+.statusLine+.statusLine{margin-top:9px}.statusLine small{margin-left:auto;color:var(--muted);font-weight:650}
+.check{width:20px;height:20px;border-radius:7px;display:grid;place-items:center;background:#1a2331;color:#718096;font-size:12px;font-weight:950}
+.check.good{background:rgba(67,209,124,.14);color:var(--good)}
+.check.bad{background:rgba(255,77,95,.14);color:var(--danger)}
+.hidden{display:none!important}
+.audienceReady{padding:38px 22px;text-align:center}
+.beacon{width:118px;height:118px;border-radius:50%;margin:8px auto 24px;position:relative;background:#0b111d;border:1px solid #26334b;display:grid;place-items:center}
+.beacon:before,.beacon:after{content:"";position:absolute;inset:-1px;border-radius:50%;border:1px solid rgba(124,168,255,.35);animation:ring 2.2s infinite ease-out}
+.beacon:after{animation-delay:1.1s}
+@keyframes ring{0%{transform:scale(.82);opacity:0}20%{opacity:1}100%{transform:scale(1.55);opacity:0}}
+.beaconCore{width:54px;height:54px;border-radius:18px;background:linear-gradient(145deg,#ecf2ff,#769cff);box-shadow:0 0 36px rgba(124,168,255,.38)}
+.note{font-size:12px;color:#7f8da2;margin-top:14px}
+.masterGrid{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
+@media(max-width:760px){.masterGrid{grid-template-columns:1fr}.shell{padding-left:12px;padding-right:12px}.card{border-radius:20px;padding:16px}}
+.sectionHead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:15px}
+.sectionHead .sub{font-size:12px;color:var(--muted)}
+.buttonGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+.buttonGrid .wide{grid-column:1/-1}
+.blackout{min-height:72px;font-size:18px}
+.control{margin-top:17px}
+.controlHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:13px;color:#cdd6e5;font-weight:780}
+.value{font-variant-numeric:tabular-nums;color:white}
+input[type=range]{width:100%;accent-color:#a9c3ff}
+.segmented{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;padding:6px;background:#090d14;border:1px solid var(--line);border-radius:15px}
+.segmented button{min-height:42px;border-radius:11px;border:0;background:transparent;color:#93a1b5;font-weight:800}
+.segmented button.active{background:#1d2940;color:#fff;box-shadow:inset 0 0 0 1px #33415d}
+.metricRow{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:14px}
+.metric{background:#090d14;border:1px solid var(--line);border-radius:14px;padding:12px;text-align:center}
+.metric b{display:block;font-size:22px;font-variant-numeric:tabular-nums}.metric span{font-size:10px;color:var(--muted);font-weight:800;letter-spacing:.5px}
+.meter{height:10px;background:#080b10;border-radius:99px;overflow:hidden;border:1px solid #20293a;margin-top:8px}
+.meter>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#5b7fce,#b8caff);border-radius:99px;transition:width .08s linear}
+.warning{margin-top:14px;border:1px solid rgba(255,191,71,.22);background:rgba(255,191,71,.07);border-radius:14px;padding:11px 12px;color:#d9bd82;font-size:12px;line-height:1.45}
+.field{display:flex;flex-direction:column;gap:7px;margin-top:12px}
+.field label{font-size:11px;color:var(--muted);font-weight:800;letter-spacing:.5px;text-transform:uppercase}
+.field input{width:100%;background:#090d14;color:#e9eef7;border:1px solid var(--line);border-radius:12px;min-height:46px;padding:0 12px;outline:none}
+.field input:focus{border-color:#51698f}
+.smallBtns{display:flex;gap:8px;margin-top:10px}.smallBtns button{min-height:45px;flex:1}
+.console{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#070a0f;border:1px solid #1f2836;border-radius:14px;padding:12px;min-height:102px;max-height:170px;overflow:auto;font-size:11px;color:#8fa0b8;white-space:pre-wrap}
+.liveTag{color:var(--good);font-weight:900}
+.offTag{color:#7f8da2;font-weight:900}
+#hiddenVideo{position:fixed;width:1px;height:1px;opacity:.001;pointer-events:none;left:-10px;top:-10px}
+.flashOverlay{position:fixed;inset:0;background:white;opacity:0;pointer-events:none;z-index:999;transition:opacity .03s}
+.flashOverlay.show{opacity:.08}
+.footer{text-align:center;color:#647086;font-size:11px;padding:18px 0 4px}
+</style>
+</head>
+<body>
+<video id="hiddenVideo" playsinline muted></video>
+<div class="flashOverlay" id="flashOverlay"></div>
+
+<div class="shell">
+  <div class="topbar">
+    <div class="brand">
+      <div class="logo">CL</div>
+      <div class="brandText"><b>CrowdLight</b><span id="roleLabel">Audience</span></div>
+    </div>
+    <div class="pill"><span class="dot" id="networkDot"></span><span id="networkText">Not connected</span></div>
+  </div>
+
+  <!-- AUDIENCE -->
+  <main id="audienceView">
+    <section class="card hero" id="joinCard">
+      <div class="heroIcon">✦</div>
+      <h1>Join the light show</h1>
+      <p>Your rear flashlight will be controlled by the show. The camera image is not displayed, saved or transmitted.</p>
+      <div class="actions">
+        <button class="primary big" id="joinBtn">ENABLE FLASHLIGHT</button>
+      </div>
+
+      <div class="statusBox">
+        <div class="statusLine"><span class="check" id="secureCheck">•</span>Secure connection<small id="secureText">checking</small></div>
+        <div class="statusLine"><span class="check" id="torchCheck">•</span>Flashlight support<small id="torchText">not tested</small></div>
+        <div class="statusLine"><span class="check" id="syncCheck">•</span>Show connection<small id="syncText">not connected</small></div>
+      </div>
+      <div class="note">Keep this page open while participating. Camera permission is required by the browser to access the rear LED.</div>
+    </section>
+
+    <section class="card audienceReady hidden" id="readyCard">
+      <div class="beacon"><div class="beaconCore"></div></div>
+      <h1 style="font-size:32px">You're in.</h1>
+      <p id="readyMessage">Waiting for the show controller…</p>
+      <div class="actions" style="max-width:520px;margin-left:auto;margin-right:auto">
+        <button class="secondary" id="testBtn">TEST MY FLASH</button>
+        <button class="ghost" id="leaveBtn">LEAVE SHOW</button>
+      </div>
+      <div class="statusBox" style="max-width:520px;margin-left:auto;margin-right:auto">
+        <div class="statusLine"><span class="dot good"></span>Room<small id="audienceRoom">MAIN</small></div>
+        <div class="statusLine"><span class="dot good"></span>Flashlight<small id="audienceTorch">READY</small></div>
+        <div class="statusLine"><span class="dot" id="audienceConnDot"></span>Controller link<small id="audienceConn">DEMO</small></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- MASTER -->
+  <main id="masterView" class="hidden">
+    <div class="masterGrid">
+      <div>
+        <section class="card">
+          <div class="sectionHead">
+            <div><h2>Show control</h2><div class="sub" id="masterModeText">BLACKOUT</div></div>
+            <div class="pill"><span class="dot good"></span><span id="masterClock">SYNC CLOCK</span></div>
+          </div>
+          <div class="buttonGrid">
+            <button class="secondary" id="allOnBtn">ALL ON</button>
+            <button class="primary" id="flashNowBtn">SYNC FLASH</button>
+            <button class="dangerBtn wide blackout" id="blackoutBtn">BLACKOUT</button>
+          </div>
+          <div class="warning">Rapid strobe is intentionally disabled. CrowdLight limits sustained flashing to 2 flashes per second to reduce photosensitive-seizure risk.</div>
+        </section>
+
+        <section class="card">
+          <div class="sectionHead">
+            <div><h2>Rhythm</h2><div class="sub">Scheduled on each phone for tighter timing</div></div>
+          </div>
+
+          <div class="control">
+            <div class="controlHead"><span>Tempo</span><span class="value"><b id="bpmReadout">120</b> BPM</span></div>
+            <input type="range" min="50" max="180" value="120" id="bpmRange">
+          </div>
+
+          <div class="control">
+            <div class="controlHead"><span>Flash length</span><span class="value"><b id="flashMsReadout">90</b> ms</span></div>
+            <input type="range" min="45" max="220" step="5" value="90" id="flashMsRange">
+          </div>
+
+          <div class="control">
+            <div class="controlHead"><span>Flash every</span><span class="value" id="divisionText">1 beat</span></div>
+            <div class="segmented" id="divisionSeg">
+              <button class="active" data-div="1">1 BEAT</button>
+              <button data-div="2">2 BEATS</button>
+              <button data-div="4">4 BEATS</button>
+            </div>
+          </div>
+
+          <div class="actions">
+            <button class="secondary" id="tapBtn">TAP TEMPO</button>
+            <button class="primary" id="startBpmBtn">START BPM</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="sectionHead">
+            <div><h2>Music sync</h2><div class="sub">Master phone microphone analyses bass/onsets</div></div>
+            <span class="pill"><span class="dot" id="micDot"></span><span id="micStatus">OFF</span></span>
+          </div>
+
+          <div class="control">
+            <div class="controlHead"><span>Detection sensitivity</span><span class="value" id="sensitivityText">65%</span></div>
+            <input type="range" min="20" max="95" value="65" id="sensitivityRange">
+          </div>
+
+          <div class="control">
+            <div class="controlHead"><span>Bass energy</span><span class="value" id="energyText">0%</span></div>
+            <div class="meter"><i id="energyBar"></i></div>
+          </div>
+
+          <div class="metricRow">
+            <div class="metric"><b id="detectedBpm">—</b><span>DETECTED BPM</span></div>
+            <div class="metric"><b id="confidence">0%</b><span>CONFIDENCE</span></div>
+            <div class="metric"><b id="beatCount">0</b><span>BEATS</span></div>
+          </div>
+
+          <div class="actions">
+            <button class="secondary" id="listenBtn">START LISTENING</button>
+            <button class="primary" id="musicSyncBtn" disabled>START MUSIC SYNC</button>
+          </div>
+        </section>
+      </div>
+
+      <div>
+        <section class="card">
+          <div class="sectionHead">
+            <div><h2>Connection</h2><div class="sub">Firebase Realtime Database</div></div>
+          </div>
+          <div class="field">
+            <label>Database URL</label>
+            <input id="dbUrlInput" placeholder="https://your-project-default-rtdb.firebaseio.com">
+          </div>
+          <div class="field">
+            <label>Room</label>
+            <input id="roomInput" value="MAIN" maxlength="24">
+          </div>
+          <div class="smallBtns">
+            <button class="secondary" id="saveConfigBtn">SAVE</button>
+            <button class="ghost" id="copyLinkBtn">COPY CROWD LINK</button>
+          </div>
+          <div class="statusBox">
+            <div class="statusLine"><span class="dot" id="dbDot"></span>Realtime link<small id="dbState">DEMO MODE</small></div>
+            <div class="statusLine"><span class="dot good"></span>Local tab testing<small>ACTIVE</small></div>
+            <div class="statusLine"><span class="dot" id="offsetDot"></span>Server clock<small id="offsetState">LOCAL</small></div>
+          </div>
+          <div class="note">For this prototype, the database can be left blank and tested in two tabs on the same device/browser. Cross-phone sync needs your Firebase Realtime Database URL.</div>
+        </section>
+
+        <section class="card">
+          <div class="sectionHead"><div><h2>System log</h2><div class="sub">Latest controller events</div></div></div>
+          <div class="console" id="console"></div>
+        </section>
+
+        <section class="card">
+          <div class="sectionHead"><div><h2>Audience link</h2><div class="sub">Use this URL for your event QR code</div></div></div>
+          <div class="field"><input id="audienceLink" readonly></div>
+          <div class="note">Built-in QR generation is the next step; this version gives you the exact audience URL to encode.</div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <div class="footer">CrowdLight prototype v0.1 • Flashlight only</div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const qs = new URLSearchParams(location.search);
+const IS_MASTER = qs.get('master') === '1' || location.hash === '#master';
+const DEFAULT_ROOM = (qs.get('room') || localStorage.getItem('crowdlight_room') || 'MAIN').toUpperCase().replace(/[^A-Z0-9_-]/g,'').slice(0,24) || 'MAIN';
+const DEFAULT_DB = qs.get('db') || localStorage.getItem('crowdlight_db') || '';
+const MAX_FLASH_HZ = 2;
+const COMMAND_TTL = 15000;
+const REFRESH_MS = 5000;
+
+let room = DEFAULT_ROOM;
+let dbUrl = normalizeDb(DEFAULT_DB);
+let serverOffset = 0;
+let track = null;
+let stream = null;
+let torchAvailable = false;
+let torchOn = false;
+let wakeLock = null;
+let commandSource = null;
+let localChannel = null;
+let patternTimer = null;
+let patternStopTimer = null;
+let lastCommandId = '';
+let currentMasterCommand = null;
+let keepAliveTimer = null;
+let division = 1;
+let taps = [];
+let masterPhaseWall = 0;
+
+// Music
+let audioCtx = null, micStream = null, analyser = null, audioRAF = 0;
+let freqData = null, energyHistory = [], onsetTimes = [], lastOnset = 0;
+let detectedPeriod = 0, detectedConfidence = 0, musicSyncRunning = false;
+let beatCounter = 0, lastMusicPublish = 0;
+
+function normalizeDb(url){
+  return (url || '').trim().replace(/\/+$/,'');
+}
+function cleanRoom(r){
+  return (r || 'MAIN').toUpperCase().replace(/[^A-Z0-9_-]/g,'').slice(0,24) || 'MAIN';
+}
+function nowServer(){ return Date.now() + serverOffset; }
+function uid(){
+  try{
+    const a = new Uint32Array(3); crypto.getRandomValues(a);
+    return [...a].map(n=>n.toString(36)).join('');
+  }catch{return Math.random().toString(36).slice(2)+Date.now().toString(36);}
+}
+function setNet(text, state=''){
+  $('#networkText').textContent = text;
+  $('#networkDot').className = 'dot' + (state ? ' '+state : '');
+}
+function log(msg){
+  const c = $('#console'); if(!c) return;
+  const t = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  c.textContent = `[${t}] ${msg}\n` + c.textContent;
+}
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+function setupRole(){
+  $('#audienceView').classList.toggle('hidden', IS_MASTER);
+  $('#masterView').classList.toggle('hidden', !IS_MASTER);
+  $('#roleLabel').textContent = IS_MASTER ? 'Master Controller' : 'Audience';
+  if(IS_MASTER) initMaster(); else initAudience();
+}
+
+function openLocalChannel(){
+  try{
+    if(localChannel) localChannel.close();
+    localChannel = new BroadcastChannel('crowdlight-' + room);
+    if(!IS_MASTER){
+      localChannel.onmessage = e => {
+        if(e.data?.type === 'command') receiveCommand(e.data.command, 'local');
+      };
+    }
+  }catch(e){}
+}
+
+// ---------------- TORCH ----------------
+async function requestTorch(){
+  if(!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access is not supported in this browser.');
+  stream = await navigator.mediaDevices.getUserMedia({
+    video:{
+      facingMode:{ideal:'environment'},
+      width:{ideal:640},
+      height:{ideal:480}
+    },
+    audio:false
+  });
+  track = stream.getVideoTracks()[0];
+  $('#hiddenVideo').srcObject = stream;
+  try{ await $('#hiddenVideo').play(); }catch(e){}
+
+  let caps = {};
+  try{ caps = track.getCapabilities ? track.getCapabilities() : {}; }catch(e){}
+  torchAvailable = !!caps.torch;
+
+  // Some browsers expose torch even when capability reporting is incomplete.
+  if(!torchAvailable){
+    try{
+      await track.applyConstraints({advanced:[{torch:true}]});
+      torchAvailable = true;
+      await sleep(100);
+      await track.applyConstraints({advanced:[{torch:false}]});
+    }catch(e){}
+  }
+  if(!torchAvailable) throw new Error('This browser/device did not expose flashlight control.');
+  return true;
+}
+async function setTorch(on){
+  if(!track || track.readyState !== 'live') return false;
+  on = !!on;
+  if(torchOn === on) return true;
+  try{
+    await track.applyConstraints({advanced:[{torch:on}]});
+  }catch(e1){
+    try{ await track.applyConstraints({torch:on}); }
+    catch(e2){ return false; }
+  }
+  torchOn = on;
+  $('#flashOverlay').classList.toggle('show', on);
+  return true;
+}
+async function flashTorch(ms=90){
+  await setTorch(true);
+  await sleep(ms);
+  await setTorch(false);
+}
+async function releaseTorch(){
+  clearPattern();
+  try{ await setTorch(false); }catch(e){}
+  if(track) try{track.stop()}catch(e){}
+  if(stream) stream.getTracks().forEach(t=>{try{t.stop()}catch(e){}});
+  track=null; stream=null; torchOn=false;
+  try{ if(wakeLock) await wakeLock.release(); }catch(e){}
+  wakeLock=null;
+}
+async function requestWakeLock(){
+  try{ if('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); }catch(e){}
+}
+document.addEventListener('visibilitychange', async()=>{
+  if(document.visibilityState === 'visible' && track && !wakeLock) requestWakeLock();
+});
+window.addEventListener('pagehide', ()=>{ setTorch(false); });
+
+// ---------------- NETWORK ----------------
+async function getServerOffset(){
+  if(!dbUrl){ serverOffset=0; return 0; }
+  try{
+    const r = await fetch(dbUrl + '/.info/serverTimeOffset.json', {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const v = await r.json();
+    serverOffset = Number(v) || 0;
+    if(IS_MASTER){
+      $('#offsetDot').className='dot good';
+      $('#offsetState').textContent = (serverOffset>=0?'+':'')+Math.round(serverOffset)+' ms';
+    }
+    return serverOffset;
+  }catch(e){
+    serverOffset=0;
+    if(IS_MASTER){ $('#offsetDot').className='dot warn'; $('#offsetState').textContent='UNAVAILABLE'; }
+    return 0;
+  }
+}
+function commandUrl(){
+  return dbUrl + '/crowdlight/' + encodeURIComponent(room) + '/command.json';
+}
+async function pushRemoteCommand(cmd){
+  if(!dbUrl) return false;
+  try{
+    const r = await fetch(commandUrl(),{
+      method:'PUT',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(cmd)
+    });
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return true;
+  }catch(e){
+    if(IS_MASTER){
+      $('#dbDot').className='dot warn'; $('#dbState').textContent='WRITE FAILED';
+      log('Firebase write failed: '+e.message);
+    }
+    return false;
+  }
+}
+async function publishCommand(cmd, {keep=false}={}){
+  if(!cmd.id) cmd.id = uid();
+  try{ localChannel?.postMessage({type:'command',command:cmd}); }catch(e){}
+  const remoteOk = await pushRemoteCommand(cmd);
+  if(IS_MASTER){
+    log(`${cmd.mode.toUpperCase()} sent${dbUrl ? (remoteOk?' to Firebase':' (Firebase failed)') : ' locally'}.`);
+  }
+  if(keep){
+    currentMasterCommand = cmd;
+    resetKeepAlive();
+  }else if(cmd.mode==='off'){
+    currentMasterCommand = null;
+    clearInterval(keepAliveTimer); keepAliveTimer=null;
+  }
+}
+function resetKeepAlive(){
+  clearInterval(keepAliveTimer);
+  keepAliveTimer = setInterval(async()=>{
+    if(!currentMasterCommand) return;
+    const c = {...currentMasterCommand, id:uid(), validUntil:nowServer()+COMMAND_TTL};
+    // Preserve phaseStart so clients do not jump phase.
+    currentMasterCommand = c;
+    try{ localChannel?.postMessage({type:'command',command:c}); }catch(e){}
+    await pushRemoteCommand(c);
+  },REFRESH_MS);
+}
+function connectRemoteAudience(){
+  if(commandSource){ try{commandSource.close()}catch(e){} commandSource=null; }
+  if(!dbUrl){
+    setNet('Local demo', 'warn');
+    $('#audienceConnDot').className='dot warn';
+    $('#audienceConn').textContent='LOCAL ONLY';
+    return;
+  }
+  try{
+    commandSource = new EventSource(commandUrl());
+    const handler = evt=>{
+      try{
+        const msg = JSON.parse(evt.data);
+        if(msg?.data) receiveCommand(msg.data,'firebase');
+      }catch(e){}
+    };
+    commandSource.addEventListener('put', handler);
+    commandSource.addEventListener('patch', handler);
+    commandSource.onopen=()=>{
+      setNet('Connected','good');
+      $('#audienceConnDot').className='dot good';
+      $('#audienceConn').textContent='LIVE';
+      $('#syncCheck').className='check good';
+      $('#syncCheck').textContent='✓';
+      $('#syncText').textContent='connected';
+    };
+    commandSource.onerror=()=>{
+      setNet('Reconnecting','warn');
+      $('#audienceConnDot').className='dot warn';
+      $('#audienceConn').textContent='RECONNECTING';
+    };
+  }catch(e){
+    setNet('Connection failed','warn');
+  }
+}
+
+// ---------------- AUDIENCE COMMAND ENGINE ----------------
+function clearPattern(){
+  if(patternTimer){ clearTimeout(patternTimer); patternTimer=null; }
+  if(patternStopTimer){ clearTimeout(patternStopTimer); patternStopTimer=null; }
+}
+function safetyExpiry(validUntil){
+  if(patternStopTimer) clearTimeout(patternStopTimer);
+  if(!validUntil) return;
+  const delay = Math.max(0, validUntil - nowServer());
+  patternStopTimer = setTimeout(()=>{ clearPattern(); setTorch(false); }, delay+80);
+}
+function receiveCommand(cmd, source){
+  if(!cmd || !cmd.mode || !track) return;
+  if(cmd.id && cmd.id===lastCommandId) return;
+  lastCommandId = cmd.id || '';
+  if(cmd.validUntil && nowServer() > cmd.validUntil + 500) return;
+  $('#readyMessage').textContent = source==='firebase' ? 'Connected to the live show.' : 'Receiving local test commands.';
+  executeCommand(cmd);
+}
+async function executeCommand(cmd){
+  clearPattern();
+  const mode = cmd.mode;
+  if(mode==='off'){
+    await setTorch(false);
+    return;
+  }
+  safetyExpiry(cmd.validUntil);
+  if(mode==='steady'){
+    const delay = Math.max(0,(cmd.startAt||nowServer())-nowServer());
+    patternTimer=setTimeout(()=>setTorch(true),delay);
+    return;
+  }
+  if(mode==='flash'){
+    const delay=Math.max(0,(cmd.startAt||nowServer())-nowServer());
+    patternTimer=setTimeout(()=>flashTorch(Math.min(250,Math.max(35,cmd.flashMs||90))),delay);
+    return;
+  }
+  if(mode==='pattern'){
+    const bpm=Math.max(30,Math.min(240,Number(cmd.bpm)||120));
+    const div=Math.max(1,Number(cmd.division)||1);
+    const rawPeriod=(60000/bpm)*div;
+    const period=Math.max(1000/MAX_FLASH_HZ,rawPeriod);
+    const flashMs=Math.min(250,Math.max(35,Number(cmd.flashMs)||90));
+    const phase=Number(cmd.phaseStart||cmd.startAt||nowServer());
+    const scheduleNext=()=>{
+      const now=nowServer();
+      let n=Math.ceil((now-phase)/period);
+      if(!Number.isFinite(n)||n<0)n=0;
+      const target=phase+n*period;
+      const delay=Math.max(0,target-now);
+      patternTimer=setTimeout(async()=>{
+        await flashTorch(flashMs);
+        scheduleNext();
+      },delay);
+    };
+    scheduleNext();
+  }
+}
+
+// ---------------- AUDIENCE UI ----------------
+function initAudience(){
+  room=DEFAULT_ROOM; dbUrl=normalizeDb(DEFAULT_DB);
+  openLocalChannel();
+  $('#audienceRoom').textContent=room;
+  const secure = location.protocol==='https:' || location.hostname==='localhost' || location.protocol==='file:';
+  $('#secureCheck').className='check '+(secure?'good':'bad');
+  $('#secureCheck').textContent=secure?'✓':'!';
+  $('#secureText').textContent=secure?'ready':'HTTPS required';
+  if(dbUrl){
+    $('#syncCheck').className='check good'; $('#syncCheck').textContent='✓'; $('#syncText').textContent='configured';
+  }else{
+    $('#syncCheck').className='check'; $('#syncCheck').textContent='•'; $('#syncText').textContent='local demo';
+  }
+
+  $('#joinBtn').onclick=async()=>{
+    const b=$('#joinBtn'); b.disabled=true; b.textContent='REQUESTING PERMISSION…';
+    try{
+      await requestTorch();
+      $('#torchCheck').className='check good'; $('#torchCheck').textContent='✓'; $('#torchText').textContent='available';
+      await requestWakeLock();
+      await getServerOffset();
+      $('#joinCard').classList.add('hidden');
+      $('#readyCard').classList.remove('hidden');
+      setNet(dbUrl?'Connecting…':'Local demo',dbUrl?'':'warn');
+      connectRemoteAudience();
+      // Confirmation flash
+      await sleep(250); await flashTorch(120);
+    }catch(e){
+      $('#torchCheck').className='check bad'; $('#torchCheck').textContent='!'; $('#torchText').textContent='not available';
+      b.disabled=false; b.textContent='TRY AGAIN';
+      alert(e.message + '\n\nTry the latest Safari/Chrome on a phone with a rear flashlight, and make sure camera permission is allowed.');
+    }
+  };
+  $('#testBtn').onclick=()=>flashTorch(130);
+  $('#leaveBtn').onclick=async()=>{
+    if(commandSource) try{commandSource.close()}catch(e){}
+    await releaseTorch();
+    $('#readyCard').classList.add('hidden');
+    $('#joinCard').classList.remove('hidden');
+    $('#joinBtn').disabled=false; $('#joinBtn').textContent='ENABLE FLASHLIGHT';
+    setNet('Not connected');
+  };
+}
+
+// ---------------- MASTER ----------------
+function buildAudienceUrl(){
+  const u=new URL(location.href);
+  u.searchParams.delete('master');
+  u.hash='';
+  u.searchParams.set('room',room);
+  if(dbUrl)u.searchParams.set('db',dbUrl); else u.searchParams.delete('db');
+  return u.href;
+}
+function refreshAudienceLink(){
+  $('#audienceLink').value=buildAudienceUrl();
+}
+async function saveConfig(){
+  room=cleanRoom($('#roomInput').value);
+  dbUrl=normalizeDb($('#dbUrlInput').value);
+  localStorage.setItem('crowdlight_room',room);
+  localStorage.setItem('crowdlight_db',dbUrl);
+  $('#roomInput').value=room; $('#dbUrlInput').value=dbUrl;
+  openLocalChannel(); refreshAudienceLink();
+  if(dbUrl){
+    $('#dbDot').className='dot good'; $('#dbState').textContent='CONFIGURED';
+    setNet('Firebase configured','good');
+    await getServerOffset();
+  }else{
+    $('#dbDot').className='dot warn'; $('#dbState').textContent='DEMO MODE';
+    $('#offsetDot').className='dot'; $('#offsetState').textContent='LOCAL';
+    setNet('Local demo','warn');
+  }
+  log('Configuration saved for room '+room+'.');
+}
+function commandBase(mode){
+  return {id:uid(),mode,room,issuedAt:nowServer(),validUntil:nowServer()+COMMAND_TTL};
+}
+async function masterOff(){
+  $('#masterModeText').textContent='BLACKOUT';
+  musicSyncRunning=false; $('#musicSyncBtn').textContent='START MUSIC SYNC';
+  await publishCommand({...commandBase('off'), validUntil:nowServer()+60000});
+}
+async function masterOn(){
+  const c={...commandBase('steady'),startAt:nowServer()+750};
+  $('#masterModeText').textContent='STEADY ON';
+  await publishCommand(c,{keep:true});
+}
+async function masterFlash(){
+  const c={...commandBase('flash'),startAt:nowServer()+900,flashMs:+$('#flashMsRange').value};
+  $('#masterModeText').textContent='SYNC FLASH';
+  await publishCommand(c);
+}
+async function masterPattern(phaseWall=0, bpmOverride=0){
+  let bpm=bpmOverride || +$('#bpmRange').value;
+  const flashMs=+$('#flashMsRange').value;
+  const actualPeriod=Math.max(1000/MAX_FLASH_HZ,(60000/bpm)*division);
+  let phaseStart;
+  if(phaseWall){
+    // Convert a local wall-clock beat phase into server time, then roll ahead.
+    phaseStart=phaseWall+serverOffset;
+    while(phaseStart < nowServer()+1100) phaseStart += actualPeriod;
+  }else{
+    phaseStart=nowServer()+1200;
+  }
+  masterPhaseWall=phaseStart-serverOffset;
+  const c={...commandBase('pattern'),bpm,division,flashMs,phaseStart,startAt:phaseStart};
+  $('#masterModeText').textContent=`${bpm.toFixed(0)} BPM • EVERY ${division}`;
+  await publishCommand(c,{keep:true});
+}
+function setDivision(d){
+  division=+d;
+  $$('#divisionSeg button').forEach(b=>b.classList.toggle('active',+b.dataset.div===division));
+  $('#divisionText').textContent=division===1?'1 beat':division+' beats';
+}
+function tapTempo(){
+  const now=performance.now();
+  if(taps.length && now-taps[taps.length-1]>2200)taps=[];
+  taps.push(now); if(taps.length>8)taps.shift();
+  if(taps.length>=2){
+    const ints=taps.slice(1).map((t,i)=>t-taps[i]).filter(x=>x>240&&x<1500);
+    if(ints.length){
+      const med=median(ints);
+      const bpm=Math.max(50,Math.min(180,60000/med));
+      $('#bpmRange').value=Math.round(bpm); updateRhythmReadouts();
+      if(currentMasterCommand?.mode==='pattern') masterPattern(Date.now(),bpm);
+    }
+  }
+  $('#tapBtn').textContent='TAP';
+  setTimeout(()=>{$('#tapBtn').textContent='TAP TEMPO'},160);
+}
+function updateRhythmReadouts(){
+  $('#bpmReadout').textContent=$('#bpmRange').value;
+  $('#flashMsReadout').textContent=$('#flashMsRange').value;
+}
+function median(arr){
+  if(!arr.length)return 0;
+  const a=[...arr].sort((x,y)=>x-y); const m=Math.floor(a.length/2);
+  return a.length%2?a[m]:(a[m-1]+a[m])/2;
+}
+
+function initMaster(){
+  room=DEFAULT_ROOM; dbUrl=normalizeDb(DEFAULT_DB);
+  $('#roomInput').value=room; $('#dbUrlInput').value=dbUrl;
+  openLocalChannel(); refreshAudienceLink(); updateRhythmReadouts();
+  setInterval(()=>$('#masterClock').textContent=new Date(nowServer()).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}),1000);
+  saveConfig();
+
+  $('#saveConfigBtn').onclick=saveConfig;
+  $('#copyLinkBtn').onclick=async()=>{
+    refreshAudienceLink();
+    try{await navigator.clipboard.writeText($('#audienceLink').value); $('#copyLinkBtn').textContent='COPIED'; setTimeout(()=>$('#copyLinkBtn').textContent='COPY CROWD LINK',1200)}
+    catch{ $('#audienceLink').select(); document.execCommand('copy'); }
+  };
+  $('#allOnBtn').onclick=masterOn;
+  $('#flashNowBtn').onclick=masterFlash;
+  $('#blackoutBtn').onclick=masterOff;
+  $('#startBpmBtn').onclick=()=>masterPattern(Date.now());
+  $('#tapBtn').onclick=tapTempo;
+  $('#bpmRange').oninput=updateRhythmReadouts;
+  $('#flashMsRange').oninput=updateRhythmReadouts;
+  $('#sensitivityRange').oninput=()=>$('#sensitivityText').textContent=$('#sensitivityRange').value+'%';
+  $$('#divisionSeg button').forEach(b=>b.onclick=()=>setDivision(b.dataset.div));
+  $('#listenBtn').onclick=toggleListening;
+  $('#musicSyncBtn').onclick=()=>{
+    musicSyncRunning=!musicSyncRunning;
+    $('#musicSyncBtn').textContent=musicSyncRunning?'STOP MUSIC SYNC':'START MUSIC SYNC';
+    if(musicSyncRunning){
+      if(detectedPeriod){
+        const bpm=60000/detectedPeriod;
+        masterPattern(lastOnset || Date.now(),bpm);
+      }
+    }else{
+      masterOff();
+    }
+  };
+}
+
+// ---------------- MUSIC ANALYSIS ----------------
+async function toggleListening(){
+  if(audioCtx){
+    stopListening();
+    return;
+  }
+  try{
+    micStream=await navigator.mediaDevices.getUserMedia({audio:{
+      echoCancellation:false, noiseSuppression:false, autoGainControl:false
+    },video:false});
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    const src=audioCtx.createMediaStreamSource(micStream);
+    analyser=audioCtx.createAnalyser();
+    analyser.fftSize=2048;
+    analyser.smoothingTimeConstant=.45;
+    src.connect(analyser);
+    freqData=new Uint8Array(analyser.frequencyBinCount);
+    energyHistory=[]; onsetTimes=[]; lastOnset=0; beatCounter=0; detectedPeriod=0; detectedConfidence=0;
+    $('#micDot').className='dot good'; $('#micStatus').textContent='LISTENING';
+    $('#listenBtn').textContent='STOP LISTENING';
+    $('#musicSyncBtn').disabled=false;
+    analyseAudio();
+    log('Microphone analysis started.');
+  }catch(e){
+    $('#micDot').className='dot warn'; $('#micStatus').textContent='DENIED';
+    log('Microphone error: '+e.message);
+    alert('Microphone permission is needed on the master phone for Music Sync.');
+  }
+}
+function stopListening(){
+  cancelAnimationFrame(audioRAF);
+  if(micStream)micStream.getTracks().forEach(t=>t.stop());
+  if(audioCtx)audioCtx.close().catch(()=>{});
+  audioCtx=null; micStream=null; analyser=null; musicSyncRunning=false;
+  $('#micDot').className='dot'; $('#micStatus').textContent='OFF';
+  $('#listenBtn').textContent='START LISTENING';
+  $('#musicSyncBtn').textContent='START MUSIC SYNC'; $('#musicSyncBtn').disabled=true;
+  $('#energyBar').style.width='0%'; $('#energyText').textContent='0%';
+}
+function analyseAudio(){
+  if(!analyser||!audioCtx)return;
+  analyser.getByteFrequencyData(freqData);
+  const binHz=audioCtx.sampleRate/analyser.fftSize;
+  const lo=Math.max(1,Math.floor(45/binHz)), hi=Math.min(freqData.length-1,Math.ceil(180/binHz));
+  let sum=0, peak=0;
+  for(let i=lo;i<=hi;i++){const v=freqData[i]/255; sum+=v*v; if(v>peak)peak=v;}
+  const energy=Math.sqrt(sum/Math.max(1,hi-lo+1));
+  const pct=Math.min(100,Math.round(energy*125));
+  $('#energyBar').style.width=pct+'%'; $('#energyText').textContent=pct+'%';
+
+  energyHistory.push(energy); if(energyHistory.length>55)energyHistory.shift();
+  const avg=energyHistory.reduce((a,b)=>a+b,0)/energyHistory.length;
+  const variance=energyHistory.reduce((a,b)=>a+(b-avg)*(b-avg),0)/Math.max(1,energyHistory.length);
+  const sd=Math.sqrt(variance);
+  const sens=+$('#sensitivityRange').value/100;
+  // Higher sensitivity => lower threshold.
+  const threshold=avg + sd*(1.75-(sens*1.1));
+  const now=Date.now();
+
+  if(energyHistory.length>14 && energy>threshold && energy>0.07 && now-lastOnset>260){
+    registerOnset(now,energy,avg,sd);
+  }
+  audioRAF=requestAnimationFrame(analyseAudio);
+}
+function registerOnset(now,energy,avg,sd){
+  lastOnset=now; onsetTimes.push(now); if(onsetTimes.length>18)onsetTimes.shift();
+  beatCounter++; $('#beatCount').textContent=beatCounter;
+
+  const candidates=[];
+  for(let i=1;i<onsetTimes.length;i++){
+    let d=onsetTimes[i]-onsetTimes[i-1];
+    if(d<250||d>1600)continue;
+    while(d<333)d*=2;
+    while(d>1000)d/=2;
+    candidates.push(d);
+  }
+  if(candidates.length>=3){
+    const med=median(candidates);
+    const deviations=candidates.map(x=>Math.abs(x-med)/med);
+    const good=deviations.filter(x=>x<.13).length;
+    detectedConfidence=Math.round(100*good/candidates.length);
+    if(!detectedPeriod)detectedPeriod=med;
+    else detectedPeriod=detectedPeriod*.72+med*.28;
+    let bpm=60000/detectedPeriod;
+    while(bpm<60){bpm*=2;detectedPeriod/=2}
+    while(bpm>180){bpm/=2;detectedPeriod*=2}
+    $('#detectedBpm').textContent=Math.round(bpm);
+    $('#confidence').textContent=detectedConfidence+'%';
+
+    if(musicSyncRunning && detectedConfidence>=45 && now-lastMusicPublish>1100){
+      lastMusicPublish=now;
+      $('#bpmRange').value=Math.round(bpm); updateRhythmReadouts();
+      masterPattern(now,bpm);
+    }
+  }
+}
+
+// Start
+setupRole();
+})();
+</script>
+</body>
+</html>
