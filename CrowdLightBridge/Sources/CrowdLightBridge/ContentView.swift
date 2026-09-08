@@ -114,7 +114,7 @@ struct ContentView: View {
                         Slider(value: $model.bpm, in: 50...180, step: 1)
                             .frame(width: 180)
                         Text("\(Int(model.bpm))")
-                            .monospacedDigit()
+                            .font(.system(.body, design: .monospaced))
                             .frame(width: 34, alignment: .trailing)
                     }
 
@@ -131,7 +131,7 @@ struct ContentView: View {
                         Slider(value: $model.flashMs, in: 45...220, step: 5)
                             .frame(width: 130)
                         Text("\(Int(model.flashMs)) ms")
-                            .monospacedDigit()
+                            .font(.system(.body, design: .monospaced))
                             .frame(width: 58, alignment: .trailing)
                     }
                 }
