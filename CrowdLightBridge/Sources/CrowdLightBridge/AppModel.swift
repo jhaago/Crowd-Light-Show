@@ -29,6 +29,7 @@ final class AppModel: ObservableObject {
     private var persistentCommand: [String: Any]?
     private var persistentAction: CrowdAction?
     private var restoreWorkItem: DispatchWorkItem?
+    private var actionVersion: UInt64 = 0
 
     init() {
         let defaults = UserDefaults.standard
@@ -151,6 +152,8 @@ final class AppModel: ObservableObject {
 
     private func send(action: CrowdAction, source: String) {
         saveSettings()
+        actionVersion &+= 1
+        let thisActionVersion = actionVersion
 
         // Any new operator or MIDI command cancels a delayed restore from a prior
         // one-shot flash. This prevents a BLACKOUT from being undone later.
@@ -165,7 +168,7 @@ final class AppModel: ObservableObject {
             sendCommand(command, description: "BLACKOUT", source: source)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                guard let self else { return }
+                guard let self, self.actionVersion == thisActionVersion else { return }
                 self.firebase.sendCommand(
                     databaseURL: self.databaseURL,
                     room: self.room,
