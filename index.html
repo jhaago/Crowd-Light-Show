@@ -930,6 +930,7 @@ function initAudience(){
 function buildAudienceUrl(){
   const u=new URL(location.href);
   u.searchParams.delete('master');
+  u.searchParams.delete('test');
   u.hash='';
   u.searchParams.set('room',room);
   u.searchParams.delete('db');
