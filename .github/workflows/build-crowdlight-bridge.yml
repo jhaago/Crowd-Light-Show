@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'CrowdLightBridge-source.zip'
+      - 'CrowdLightBridge/**'
       - '.github/workflows/build-crowdlight-bridge.yml'
 
 jobs:
@@ -13,9 +13,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Unpack Bridge source
-        run: unzip -q CrowdLightBridge-source.zip
 
       - name: Build macOS app
         run: |

@@ -1,0 +1,304 @@
+import Foundation
+import Combine
+import AppKit
+
+final class AppModel: ObservableObject {
+    static let defaultDatabaseURL = "https://crowd-light-show-default-rtdb.asia-southeast1.firebasedatabase.app"
+
+    @Published var databaseURL: String
+    @Published var room: String
+    @Published var midiChannel: Int
+    @Published var selectedSourceID: Int32 = 0
+    @Published var externalCuesEnabled: Bool = false
+    @Published var bpm: Double
+    @Published var division: Int
+    @Published var flashMs: Double
+
+    @Published var firebaseState: String = "Not tested"
+    @Published var firebaseConnected: Bool = false
+    @Published var clockOffsetText: String = "—"
+    @Published var currentState: String = "BLACKOUT"
+    @Published var lastCue: String = "No cue received"
+    @Published var logs: [BridgeLogEntry] = []
+
+    let cueMappings = CueMapping.defaults
+    let midi = MIDIManager()
+    private let firebase = FirebaseTransport()
+
+    private var keepAliveTimer: Timer?
+    private var persistentCommand: [String: Any]?
+    private var persistentAction: CrowdAction?
+
+    init() {
+        let defaults = UserDefaults.standard
+        databaseURL = defaults.string(forKey: "databaseURL") ?? Self.defaultDatabaseURL
+        room = defaults.string(forKey: "room") ?? "MAIN"
+        let storedChannel = defaults.integer(forKey: "midiChannel")
+        midiChannel = storedChannel == 0 ? 16 : min(16, max(1, storedChannel))
+        bpm = defaults.object(forKey: "bpm") as? Double ?? 120
+        let storedDivision = defaults.integer(forKey: "division")
+        division = [1, 2, 4].contains(storedDivision) ? storedDivision : 1
+        flashMs = defaults.object(forKey: "flashMs") as? Double ?? 90
+
+        midi.onNoteOn = { [weak self] note, channel, velocity in
+            self?.handleMIDI(note: note, channel: channel, velocity: velocity)
+        }
+
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.saveSettings()
+        }
+    }
+
+    deinit {
+        keepAliveTimer?.invalidate()
+    }
+
+    func start() {
+        midi.refreshSources()
+        if let crowdSource = midi.sources.first(where: { $0.name.localizedCaseInsensitiveContains("CrowdLight") }) {
+            selectMIDISource(crowdSource.id)
+        }
+        testFirebase()
+        log("Bridge started. External cues are disabled by default.", success: nil)
+    }
+
+    func saveSettings() {
+        let defaults = UserDefaults.standard
+        defaults.set(databaseURL, forKey: "databaseURL")
+        defaults.set(room, forKey: "room")
+        defaults.set(midiChannel, forKey: "midiChannel")
+        defaults.set(bpm, forKey: "bpm")
+        defaults.set(division, forKey: "division")
+        defaults.set(flashMs, forKey: "flashMs")
+    }
+
+    func selectMIDISource(_ id: Int32) {
+        selectedSourceID = id
+        midi.connect(to: id)
+        if let source = midi.sources.first(where: { $0.id == id }) {
+            log("MIDI source selected: \(source.name)", success: true)
+        }
+    }
+
+    func refreshMIDI() {
+        midi.refreshSources()
+        log("MIDI source list refreshed.", success: nil)
+    }
+
+    func testFirebase() {
+        firebaseState = "Testing…"
+        firebaseConnected = false
+        saveSettings()
+
+        firebase.testConnection(databaseURL: databaseURL, room: room) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let offset):
+                    self.firebaseConnected = true
+                    self.firebaseState = "Connected • TEST MODE"
+                    self.clockOffsetText = String(format: "%+.0f ms", offset)
+                    self.log("Firebase write test succeeded. Server offset \(self.clockOffsetText).", success: true)
+                case .failure(let error):
+                    self.firebaseConnected = false
+                    self.firebaseState = "Connection failed"
+                    self.clockOffsetText = "—"
+                    self.log("Firebase test failed: \(error.localizedDescription)", success: false)
+                }
+            }
+        }
+    }
+
+    func toggleExternalCues() {
+        externalCuesEnabled.toggle()
+        log("External ProPresenter cues \(externalCuesEnabled ? "ENABLED" : "DISABLED").", success: externalCuesEnabled)
+    }
+
+    func simulateCue(_ mapping: CueMapping) {
+        lastCue = "SIMULATED • \(mapping.noteName) / MIDI \(mapping.note) → \(mapping.action.label)"
+        log(lastCue, success: nil)
+        send(action: mapping.action, source: "Simulator")
+    }
+
+    func sendManual(_ action: CrowdAction) {
+        send(action: action, source: "Manual")
+    }
+
+    private func handleMIDI(note: Int, channel: Int, velocity: Int) {
+        guard channel == midiChannel else {
+            log("Ignored MIDI note \(note) on channel \(channel) (CrowdLight listens on Ch \(midiChannel)).", success: nil)
+            return
+        }
+        guard externalCuesEnabled else {
+            log("Received MIDI \(note) on Ch \(channel), but external cues are disabled.", success: nil)
+            return
+        }
+        guard let mapping = cueMappings.first(where: { $0.note == note }) else {
+            log("No CrowdLight mapping for MIDI note \(note) on Ch \(channel).", success: nil)
+            return
+        }
+
+        lastCue = "\(mapping.noteName) / MIDI \(note) • Ch \(channel) → \(mapping.action.label)"
+        log(lastCue, success: nil)
+        send(action: mapping.action, source: "ProPresenter MIDI")
+    }
+
+    private func send(action: CrowdAction, source: String) {
+        saveSettings()
+
+        switch action {
+        case .blackout:
+            stopPersistentMode()
+            currentState = "BLACKOUT"
+            let command = baseCommand(mode: "off", ttlMs: 60_000)
+            sendCommand(command, description: "BLACKOUT", source: source)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self else { return }
+                self.firebase.sendCommand(
+                    databaseURL: self.databaseURL,
+                    room: self.room,
+                    command: self.baseCommand(mode: "off", ttlMs: 60_000)
+                ) { _ in }
+            }
+
+        case .allOn:
+            var command = baseCommand(mode: "steady")
+            command["startAt"] = firebase.estimatedServerNowMs() + 750
+            currentState = "ALL LIGHTS ON"
+            beginPersistentMode(action: action, command: command)
+            sendCommand(command, description: action.label, source: source)
+
+        case .syncFlash:
+            let previousCommand = persistentCommand
+            let previousAction = persistentAction
+            var command = baseCommand(mode: "flash")
+            command["startAt"] = firebase.estimatedServerNowMs() + 900
+            command["flashMs"] = Int(flashMs)
+            currentState = "SYNC FLASH"
+            sendCommand(command, description: action.label, source: source)
+
+            if let previousCommand, let previousAction {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak self] in
+                    guard let self else { return }
+                    var restored = previousCommand
+                    restored["id"] = UUID().uuidString
+                    restored["issuedAt"] = self.firebase.estimatedServerNowMs()
+                    restored["validUntil"] = self.firebase.estimatedServerNowMs() + 15_000
+                    self.persistentCommand = restored
+                    self.persistentAction = previousAction
+                    self.currentState = previousAction.label
+                    self.firebase.sendCommand(
+                        databaseURL: self.databaseURL,
+                        room: self.room,
+                        command: restored
+                    ) { _ in }
+                }
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { [weak self] in
+                    if self?.persistentAction == nil {
+                        self?.currentState = "BLACKOUT"
+                    }
+                }
+            }
+
+        case .unison, .twinkle, .sparkle, .constellation:
+            var command = baseCommand(mode: "pattern")
+            let phase = firebase.estimatedServerNowMs() + 1_200
+            command["bpm"] = bpm
+            command["division"] = division
+            command["flashMs"] = Int(flashMs)
+            command["effect"] = action.effectName ?? "unison"
+            command["phaseStart"] = phase
+            command["startAt"] = phase
+            currentState = "\(action.label) • \(Int(bpm)) BPM"
+            beginPersistentMode(action: action, command: command)
+            sendCommand(command, description: "\(action.label) at \(Int(bpm)) BPM", source: source)
+        }
+    }
+
+    private func baseCommand(mode: String, ttlMs: Double = 15_000) -> [String: Any] {
+        let now = firebase.estimatedServerNowMs()
+        return [
+            "id": UUID().uuidString,
+            "mode": mode,
+            "room": cleanRoom(room),
+            "issuedAt": now,
+            "validUntil": now + ttlMs,
+            "bridge": "macOS"
+        ]
+    }
+
+    private func beginPersistentMode(action: CrowdAction, command: [String: Any]) {
+        keepAliveTimer?.invalidate()
+        persistentAction = action
+        persistentCommand = command
+
+        keepAliveTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self, var refreshed = self.persistentCommand else { return }
+            refreshed["id"] = UUID().uuidString
+            refreshed["issuedAt"] = self.firebase.estimatedServerNowMs()
+            refreshed["validUntil"] = self.firebase.estimatedServerNowMs() + 15_000
+            self.persistentCommand = refreshed
+            self.firebase.sendCommand(
+                databaseURL: self.databaseURL,
+                room: self.room,
+                command: refreshed
+            ) { result in
+                if case .failure(let error) = result {
+                    DispatchQueue.main.async {
+                        self.firebaseConnected = false
+                        self.firebaseState = "Write failed"
+                        self.log("Keepalive write failed: \(error.localizedDescription)", success: false)
+                    }
+                }
+            }
+        }
+    }
+
+    private func stopPersistentMode() {
+        keepAliveTimer?.invalidate()
+        keepAliveTimer = nil
+        persistentCommand = nil
+        persistentAction = nil
+    }
+
+    private func sendCommand(_ command: [String: Any], description: String, source: String) {
+        firebase.sendCommand(databaseURL: databaseURL, room: room, command: command) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.firebaseConnected = true
+                    self.firebaseState = "Connected • TEST MODE"
+                    self.log("\(description) sent from \(source).", success: true)
+                case .failure(let error):
+                    self.firebaseConnected = false
+                    self.firebaseState = "Write failed"
+                    self.log("\(description) failed: \(error.localizedDescription)", success: false)
+                }
+            }
+        }
+    }
+
+    private func cleanRoom(_ raw: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        let cleaned = raw.uppercased()
+            .unicodeScalars
+            .filter { allowed.contains($0) }
+            .map(String.init)
+            .joined()
+        return cleaned.isEmpty ? "MAIN" : String(cleaned.prefix(24))
+    }
+
+    func log(_ message: String, success: Bool?) {
+        logs.insert(BridgeLogEntry(time: Date(), message: message, success: success), at: 0)
+        if logs.count > 100 {
+            logs.removeLast(logs.count - 100)
+        }
+    }
+}
