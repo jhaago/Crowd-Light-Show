@@ -252,10 +252,13 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.3 • multi-camera torch detection • Firebase connected</div>
+  <div class="footer">CrowdLight prototype v0.4 • official Firebase live sync • flashlight only</div>
 </div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
+import { getDatabase, ref as dbRef, set as dbSet, onValue as dbOnValue, get as dbGet } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
+
 (() => {
 'use strict';
 
@@ -278,7 +281,12 @@ let stream = null;
 let torchAvailable = false;
 let torchOn = false;
 let wakeLock = null;
-let commandSource = null;
+let commandSource = null; // Firebase unsubscribe function on audience devices
+let firebaseApp = null;
+let firebaseDb = null;
+let firebaseDbUrl = '';
+let firebaseInfoUnsubs = [];
+let firebaseConnected = false;
 let localChannel = null;
 let patternTimer = null;
 let patternStopTimer = null;
@@ -472,104 +480,174 @@ document.addEventListener('visibilitychange', async()=>{
 window.addEventListener('pagehide', ()=>{ setTorch(false); });
 
 // ---------------- NETWORK ----------------
+async function ensureFirebase(){
+  if(!dbUrl) return false;
+  if(firebaseDb && firebaseDbUrl===dbUrl) return true;
+
+  // Create a deterministic app name so changing database URLs does not collide.
+  let h=0;
+  for(let i=0;i<dbUrl.length;i++) h=((h<<5)-h+dbUrl.charCodeAt(i))|0;
+  const appName='crowdlight-'+Math.abs(h);
+
+  firebaseApp = initializeApp({databaseURL:dbUrl}, appName);
+  firebaseDb = getDatabase(firebaseApp, dbUrl);
+  firebaseDbUrl = dbUrl;
+  return true;
+}
+
+function clearFirebaseInfo(){
+  firebaseInfoUnsubs.forEach(fn=>{ try{fn()}catch(e){} });
+  firebaseInfoUnsubs=[];
+}
+
+async function watchFirebaseInfo(){
+  if(!await ensureFirebase()) return;
+  clearFirebaseInfo();
+
+  firebaseInfoUnsubs.push(dbOnValue(dbRef(firebaseDb,'.info/connected'), snap=>{
+    firebaseConnected = snap.val()===true;
+    if(IS_MASTER){
+      $('#dbDot').className='dot '+(firebaseConnected?'good':'warn');
+      $('#dbState').textContent=firebaseConnected?'CONNECTED':'RECONNECTING';
+      setNet(firebaseConnected?'Firebase connected':'Firebase reconnecting',firebaseConnected?'good':'warn');
+    }else if(track){
+      $('#audienceConnDot').className='dot '+(firebaseConnected?'good':'warn');
+      $('#audienceConn').textContent=firebaseConnected?'LIVE':'RECONNECTING';
+      setNet(firebaseConnected?'Connected':'Reconnecting',firebaseConnected?'good':'warn');
+      $('#syncCheck').className='check '+(firebaseConnected?'good':'');
+      $('#syncCheck').textContent=firebaseConnected?'✓':'•';
+      $('#syncText').textContent=firebaseConnected?'connected':'reconnecting';
+    }
+  }, err=>{
+    firebaseConnected=false;
+    if(IS_MASTER){
+      $('#dbDot').className='dot warn';
+      $('#dbState').textContent='CONNECTION ERROR';
+      log('Firebase connection error: '+(err?.message||err));
+    }
+  }));
+
+  firebaseInfoUnsubs.push(dbOnValue(dbRef(firebaseDb,'.info/serverTimeOffset'), snap=>{
+    serverOffset=Number(snap.val())||0;
+    if(IS_MASTER){
+      $('#offsetDot').className='dot good';
+      $('#offsetState').textContent=(serverOffset>=0?'+':'')+Math.round(serverOffset)+' ms';
+    }
+  }, err=>{
+    if(IS_MASTER){
+      $('#offsetDot').className='dot warn';
+      $('#offsetState').textContent='UNAVAILABLE';
+    }
+  }));
+}
+
 async function getServerOffset(){
   if(!dbUrl){ serverOffset=0; return 0; }
   try{
-    const r = await fetch(dbUrl + '/.info/serverTimeOffset.json', {cache:'no-store'});
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const v = await r.json();
-    serverOffset = Number(v) || 0;
+    if(!await ensureFirebase()) return 0;
+    const snap=await dbGet(dbRef(firebaseDb,'.info/serverTimeOffset'));
+    serverOffset=Number(snap.val())||0;
     if(IS_MASTER){
       $('#offsetDot').className='dot good';
-      $('#offsetState').textContent = (serverOffset>=0?'+':'')+Math.round(serverOffset)+' ms';
+      $('#offsetState').textContent=(serverOffset>=0?'+':'')+Math.round(serverOffset)+' ms';
     }
     return serverOffset;
   }catch(e){
     serverOffset=0;
-    if(IS_MASTER){ $('#offsetDot').className='dot warn'; $('#offsetState').textContent='UNAVAILABLE'; }
+    if(IS_MASTER){
+      $('#offsetDot').className='dot warn';
+      $('#offsetState').textContent='UNAVAILABLE';
+      log('Server clock error: '+(e?.message||e));
+    }
     return 0;
   }
 }
-function commandUrl(){
-  return dbUrl + '/crowdlight/' + encodeURIComponent(room) + '/command.json';
+
+function commandPath(){
+  return 'crowdlight/' + room + '/command';
 }
+
 async function pushRemoteCommand(cmd){
   if(!dbUrl) return false;
   try{
-    const r = await fetch(commandUrl(),{
-      method:'PUT',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(cmd)
-    });
-    if(!r.ok) throw new Error('HTTP '+r.status);
+    if(!await ensureFirebase()) return false;
+    await dbSet(dbRef(firebaseDb,commandPath()),cmd);
     return true;
   }catch(e){
     if(IS_MASTER){
-      $('#dbDot').className='dot warn'; $('#dbState').textContent='WRITE FAILED';
-      log('Firebase write failed: '+e.message);
+      $('#dbDot').className='dot warn';
+      $('#dbState').textContent='WRITE FAILED';
+      log('Firebase write failed: '+(e?.message||e));
     }
     return false;
   }
 }
+
 async function publishCommand(cmd, {keep=false}={}){
   if(!cmd.id) cmd.id = uid();
   try{ localChannel?.postMessage({type:'command',command:cmd}); }catch(e){}
   const remoteOk = await pushRemoteCommand(cmd);
+
   if(IS_MASTER){
+    if(remoteOk){
+      $('#dbDot').className='dot good';
+      $('#dbState').textContent=firebaseConnected?'CONNECTED':'WRITE OK';
+    }
     log(`${cmd.mode.toUpperCase()} sent${dbUrl ? (remoteOk?' to Firebase':' (Firebase failed)') : ' locally'}.`);
   }
+
   if(keep){
     currentMasterCommand = cmd;
     resetKeepAlive();
   }else if(cmd.mode==='off'){
     currentMasterCommand = null;
-    clearInterval(keepAliveTimer); keepAliveTimer=null;
+    clearInterval(keepAliveTimer);
+    keepAliveTimer=null;
   }
 }
+
 function resetKeepAlive(){
   clearInterval(keepAliveTimer);
-  keepAliveTimer = setInterval(async()=>{
+  keepAliveTimer=setInterval(async()=>{
     if(!currentMasterCommand) return;
-    const c = {...currentMasterCommand, id:uid(), validUntil:nowServer()+COMMAND_TTL};
-    // Preserve phaseStart so clients do not jump phase.
-    currentMasterCommand = c;
+    const c={...currentMasterCommand,id:uid(),validUntil:nowServer()+COMMAND_TTL};
+    currentMasterCommand=c;
     try{ localChannel?.postMessage({type:'command',command:c}); }catch(e){}
     await pushRemoteCommand(c);
   },REFRESH_MS);
 }
-function connectRemoteAudience(){
-  if(commandSource){ try{commandSource.close()}catch(e){} commandSource=null; }
+
+async function connectRemoteAudience(){
+  if(commandSource){
+    try{commandSource()}catch(e){}
+    commandSource=null;
+  }
+
   if(!dbUrl){
-    setNet('Local demo', 'warn');
+    setNet('Local demo','warn');
     $('#audienceConnDot').className='dot warn';
     $('#audienceConn').textContent='LOCAL ONLY';
     return;
   }
+
   try{
-    commandSource = new EventSource(commandUrl());
-    const handler = evt=>{
-      try{
-        const msg = JSON.parse(evt.data);
-        if(msg?.data) receiveCommand(msg.data,'firebase');
-      }catch(e){}
-    };
-    commandSource.addEventListener('put', handler);
-    commandSource.addEventListener('patch', handler);
-    commandSource.onopen=()=>{
-      setNet('Connected','good');
-      $('#audienceConnDot').className='dot good';
-      $('#audienceConn').textContent='LIVE';
-      $('#syncCheck').className='check good';
-      $('#syncCheck').textContent='✓';
-      $('#syncText').textContent='connected';
-    };
-    commandSource.onerror=()=>{
-      setNet('Reconnecting','warn');
+    if(!await ensureFirebase()) throw new Error('Firebase is not configured.');
+    await watchFirebaseInfo();
+
+    commandSource=dbOnValue(dbRef(firebaseDb,commandPath()),snap=>{
+      const cmd=snap.val();
+      if(cmd) receiveCommand(cmd,'firebase');
+    },err=>{
+      setNet('Firebase error','warn');
       $('#audienceConnDot').className='dot warn';
-      $('#audienceConn').textContent='RECONNECTING';
-    };
+      $('#audienceConn').textContent='ERROR';
+      $('#readyMessage').textContent='Controller connection error: '+(err?.message||err);
+    });
   }catch(e){
     setNet('Connection failed','warn');
+    $('#audienceConnDot').className='dot warn';
+    $('#audienceConn').textContent='FAILED';
+    $('#readyMessage').textContent='Could not connect to the show controller.';
   }
 }
 
@@ -668,7 +746,7 @@ function initAudience(){
   };
   $('#testBtn').onclick=()=>flashTorch(130);
   $('#leaveBtn').onclick=async()=>{
-    if(commandSource) try{commandSource.close()}catch(e){}
+    if(commandSource) try{commandSource()}catch(e){}
     await releaseTorch();
     $('#readyCard').classList.add('hidden');
     $('#joinCard').classList.remove('hidden');
@@ -697,9 +775,17 @@ async function saveConfig(){
   $('#roomInput').value=room; $('#dbUrlInput').value=dbUrl;
   openLocalChannel(); refreshAudienceLink();
   if(dbUrl){
-    $('#dbDot').className='dot good'; $('#dbState').textContent='CONFIGURED';
-    setNet('Firebase configured','good');
-    await getServerOffset();
+    $('#dbDot').className='dot warn'; $('#dbState').textContent='CONNECTING';
+    setNet('Connecting to Firebase','warn');
+    try{
+      await ensureFirebase();
+      await watchFirebaseInfo();
+      await getServerOffset();
+    }catch(e){
+      $('#dbDot').className='dot warn';
+      $('#dbState').textContent='CONNECTION ERROR';
+      log('Firebase setup error: '+(e?.message||e));
+    }
   }else{
     $('#dbDot').className='dot warn'; $('#dbState').textContent='DEMO MODE';
     $('#offsetDot').className='dot'; $('#offsetState').textContent='LOCAL';
