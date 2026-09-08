@@ -1,0 +1,30 @@
+name: Build CrowdLight Bridge
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'CrowdLightBridge-source.zip'
+      - '.github/workflows/build-crowdlight-bridge.yml'
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Unpack Bridge source
+        run: unzip -q CrowdLightBridge-source.zip
+
+      - name: Build macOS app
+        run: |
+          cd CrowdLightBridge
+          bash scripts/build-app.sh
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrowdLight-Bridge-macOS
+          path: CrowdLightBridge/dist/CrowdLight-Bridge-macOS.zip
+          if-no-files-found: error
