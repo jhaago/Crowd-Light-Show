@@ -962,6 +962,7 @@ async function connectRemoteAudience(){
     commandSource=dbOnValue(dbRef(firebaseDb,commandPath()),snap=>{
       const cmd=snap.val();
       if(cmd) receiveCommand(cmd,'firebase');
+      else failSafeAudienceOff('Controller command was cleared. Waiting safely…');
     },err=>{
       setNet('Firebase error','warn');
       $('#audienceConnDot').className='dot warn';
