@@ -45,7 +45,7 @@ struct ContentView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
-                Text("v0.1")
+                Text("v0.2")
                     .font(.caption)
                     .fontWeight(.semibold)
                 Text("macOS 11+")
@@ -73,7 +73,7 @@ struct ContentView: View {
                 title: "CURRENT STATE",
                 headline: model.currentState,
                 detail: model.lastCue,
-                good: model.currentState != "BLACKOUT"
+                good: model.currentState != "BLACKOUT" && model.currentState != "NO COMMAND SENT"
             )
         }
     }
@@ -180,7 +180,7 @@ struct ContentView: View {
                     Button("Test Firebase") { model.testFirebase() }
                 }
 
-                Text("v0.1 uses the current Firebase test-mode database. Authentication will be added after the multi-device functional test.")
+                Text("v0.2 uses the current Firebase test-mode database. Authentication will be added after the multi-device functional test.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -208,7 +208,7 @@ struct ContentView: View {
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
-                        Button("Simulate Cue") { model.simulateCue(cue) }
+                        Button("SEND TEST CUE") { model.simulateCue(cue) }
                     }
                     .padding(.vertical, 8)
                     if cue.id != model.cueMappings.last?.id {
@@ -217,6 +217,10 @@ struct ContentView: View {
                 }
             }
             .padding(.top, 4)
+            Text("SEND TEST CUE writes a real command to the configured CrowdLight room. Use only during a controlled test.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .padding(.top, 8)
         }
     }
 
