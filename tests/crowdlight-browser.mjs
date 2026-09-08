@@ -71,6 +71,18 @@ async function testMaster(browser) {
   assert.equal(cmd.effect, "twinkle");
   assert.equal(cmd.division, 1);
 
+  const expandedEffects = [
+    "shimmer", "sparkle", "glow", "fireflies", "alternate",
+    "constellation", "build", "drop", "unison", "twinkle"
+  ];
+  for (const effect of expandedEffects) {
+    await page.click(`[data-effect="${effect}"]`);
+    await page.waitForTimeout(60);
+    cmd = await lastCommand(page);
+    assert.equal(cmd.mode, "pattern");
+    assert.equal(cmd.effect, effect, `Master did not publish ${effect}`);
+  }
+
   await page.click('#divisionSeg [data-div="2"]');
   await page.waitForTimeout(80);
   cmd = await lastCommand(page);
@@ -159,6 +171,7 @@ async function makeAudiencePage(browser, torchSupported = true, options = {}) {
   await stubFirebase(page);
 
   await page.addInitScript(({supported, options}) => {
+    localStorage.setItem("crowdlight_client_seed", "123456789");
     window.__fakeTorch = {
       on: false,
       toggles: [],
@@ -411,6 +424,121 @@ async function testAudienceSuccess(browser) {
   }));
   await page.waitForTimeout(80);
   assert.equal(await page.evaluate(() => window.__fakeTorch.on), false);
+
+  // SHIMMER should create a rapid-looking group scheduler while this individual
+  // phone still respects the global physical ON interval.
+  await page.waitForTimeout(520);
+  const shimmerStart = await page.evaluate(() => window.__fakeTorch.toggles.length);
+  await page.evaluate(() => {
+    const now = Date.now();
+    window.__crowdlightInjectCommand({
+      id: "shimmer-test",
+      mode: "pattern",
+      bpm: 120,
+      division: 1,
+      effect: "shimmer",
+      flashMs: 70,
+      phaseStart: now + 40,
+      startAt: now + 40,
+      validUntil: now + 1800
+    });
+  });
+  await page.waitForTimeout(1250);
+  const shimmerOns = await page.evaluate(start => (
+    window.__fakeTorch.toggles.slice(start).filter(x => x.on).map(x => x.at)
+  ), shimmerStart);
+  assert.ok(shimmerOns.length >= 1, "SHIMMER did not schedule this phone's group");
+  for (let i = 1; i < shimmerOns.length; i++) {
+    assert.ok(shimmerOns[i] - shimmerOns[i - 1] >= 430, "SHIMMER exceeded per-phone safety ceiling");
+  }
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-shimmer",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(80);
+
+  // GLOW uses long synchronized holds rather than short flash pulses.
+  await page.waitForTimeout(520);
+  await page.evaluate(() => {
+    const now = Date.now();
+    window.__crowdlightInjectCommand({
+      id: "glow-test",
+      mode: "pattern",
+      bpm: 120,
+      division: 1,
+      effect: "glow",
+      flashMs: 90,
+      phaseStart: now + 40,
+      startAt: now + 40,
+      validUntil: now + 2800
+    });
+  });
+  await page.waitForTimeout(180);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true, "GLOW did not enter long ON state");
+  await page.waitForTimeout(980);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "GLOW did not transition to OFF state");
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-glow",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(80);
+
+  // ALTERNATE must swap the two deterministic phone halves.
+  await page.waitForTimeout(520);
+  await page.evaluate(() => {
+    const now = Date.now();
+    window.__crowdlightInjectCommand({
+      id: "alternate-test",
+      mode: "pattern",
+      bpm: 120,
+      division: 1,
+      effect: "alternate",
+      flashMs: 90,
+      phaseStart: now + 40,
+      startAt: now + 40,
+      validUntil: now + 2200
+    });
+  });
+  await page.waitForTimeout(180);
+  const alternateFirst = await page.evaluate(() => window.__fakeTorch.on);
+  await page.waitForTimeout(520);
+  const alternateSecond = await page.evaluate(() => window.__fakeTorch.on);
+  assert.notEqual(alternateSecond, alternateFirst, "ALTERNATE did not swap phone halves");
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-alternate",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(80);
+
+  // All remaining expanded effects must be accepted by the audience protocol
+  // without triggering the malformed-command fail-safe.
+  for (const effect of ["fireflies", "build", "drop", "constellation", "twinkle", "sparkle", "unison"]) {
+    const result = await page.evaluate(effect => {
+      const now = Date.now();
+      window.__crowdlightInjectCommand({
+        id: "accept-" + effect,
+        mode: "pattern",
+        bpm: 120,
+        division: 1,
+        effect,
+        flashMs: 90,
+        phaseStart: now + 100,
+        startAt: now + 100,
+        validUntil: now + 900
+      });
+      return window.__crowdlightTestState().activeAudienceCommand?.effect || null;
+    }, effect);
+    assert.equal(result, effect, `Audience rejected expanded effect ${effect}`);
+  }
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-expanded-effects",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(80);
 
   // C1 regression: BLACKOUT during an already-running pattern flash must
   // permanently invalidate that pattern closure. It must not schedule again.
