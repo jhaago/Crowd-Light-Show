@@ -204,25 +204,23 @@ final class MIDIManager: ObservableObject {
         return [0x90 | safeChannel, safeNote, safeVelocity]
     }
 
+    static func noteOffBytes(note: Int, channel: Int) -> [UInt8] {
+        let safeNote = UInt8(max(0, min(127, note)))
+        let safeChannel = UInt8(max(1, min(16, channel)) - 1)
+        return [0x80 | safeChannel, safeNote, 0]
+    }
+
     static func bestDestinationIndex(
         sourceName: String,
         destinationNames: [String]
     ) -> Int? {
         let source = sourceName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let exact = destinationNames.firstIndex(where: {
-            $0.compare(source, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
-        }) {
-            return exact
-        }
-
-        let crowdMatches = destinationNames.enumerated().filter {
-            $0.element.localizedCaseInsensitiveContains("CrowdLight")
-        }
-        if crowdMatches.count == 1 {
-            return crowdMatches[0].offset
-        }
-
-        return nil
+        return destinationNames.firstIndex(where: {
+            $0.compare(
+                source,
+                options: [.caseInsensitive, .diacriticInsensitive]
+            ) == .orderedSame
+        })
     }
 
     func sendLoopbackTest(
@@ -270,11 +268,19 @@ final class MIDIManager: ObservableObject {
             )
         }
 
-        let bytes = Self.noteOnBytes(
-            note: note,
-            channel: channel,
-            velocity: velocity
-        )
+        // Send a matching Note Off in the same diagnostic packet. CrowdLight
+        // consumes only the Note On, while generic MIDI listeners will not be
+        // left with a latched note if they also observe the dedicated IAC bus.
+        let bytes =
+            Self.noteOnBytes(
+                note: note,
+                channel: channel,
+                velocity: velocity
+            ) +
+            Self.noteOffBytes(
+                note: note,
+                channel: channel
+            )
 
         let capacity = 64
         let raw = UnsafeMutableRawPointer.allocate(
@@ -319,14 +325,15 @@ final class MIDIManager: ObservableObject {
         while index < bytes.count {
             let status = bytes[index]
 
-            // CoreMIDI packet data uses complete MIDI messages; running status is
-            // not expected here. Stray data bytes are ignored defensively.
+            // Running status is not expected from the dedicated ProPresenter
+            // IAC path. Stray data bytes are ignored defensively.
             if status < 0x80 {
                 index += 1
                 continue
             }
 
-            // Single-byte realtime messages may be interleaved.
+            // MIDI realtime bytes may legally appear between any other MIDI
+            // bytes without affecting the surrounding message.
             if status >= 0xF8 {
                 index += 1
                 continue
@@ -335,16 +342,37 @@ final class MIDIManager: ObservableObject {
             if status >= 0xF0 {
                 switch status {
                 case 0xF0:
-                    // Skip SysEx through EOX, or to packet end for a fragment.
                     index += 1
                     while index < bytes.count && bytes[index] != 0xF7 {
                         index += 1
                     }
                     if index < bytes.count { index += 1 }
                 case 0xF1, 0xF3:
-                    index += min(2, bytes.count - index)
+                    var needed = 1
+                    index += 1
+                    while index < bytes.count && needed > 0 {
+                        let byte = bytes[index]
+                        if byte >= 0xF8 {
+                            index += 1
+                            continue
+                        }
+                        if byte >= 0x80 { break }
+                        needed -= 1
+                        index += 1
+                    }
                 case 0xF2:
-                    index += min(3, bytes.count - index)
+                    var needed = 2
+                    index += 1
+                    while index < bytes.count && needed > 0 {
+                        let byte = bytes[index]
+                        if byte >= 0xF8 {
+                            index += 1
+                            continue
+                        }
+                        if byte >= 0x80 { break }
+                        needed -= 1
+                        index += 1
+                    }
                 default:
                     index += 1
                 }
@@ -353,15 +381,35 @@ final class MIDIManager: ObservableObject {
 
             let messageType = status & 0xF0
             let channel = Int(status & 0x0F) + 1
-            let length = (messageType == 0xC0 || messageType == 0xD0) ? 2 : 3
+            let dataCount = (messageType == 0xC0 || messageType == 0xD0) ? 1 : 2
 
-            guard index + length <= bytes.count else {
-                break
+            var data: [UInt8] = []
+            data.reserveCapacity(dataCount)
+            var cursor = index + 1
+
+            while cursor < bytes.count && data.count < dataCount {
+                let byte = bytes[cursor]
+                if byte >= 0xF8 {
+                    cursor += 1
+                    continue
+                }
+                if byte >= 0x80 {
+                    break
+                }
+                data.append(byte)
+                cursor += 1
             }
 
-            if messageType == 0x90 {
-                let note = Int(bytes[index + 1])
-                let velocity = Int(bytes[index + 2])
+            guard data.count == dataCount else {
+                // If a new status interrupted a truncated message, let the next
+                // loop process that status rather than swallowing it.
+                index = max(index + 1, cursor)
+                continue
+            }
+
+            if messageType == 0x90, data.count == 2 {
+                let note = Int(data[0])
+                let velocity = Int(data[1])
                 if velocity > 0 {
                     result.append(
                         ParsedMIDINoteOn(
@@ -373,7 +421,7 @@ final class MIDIManager: ObservableObject {
                 }
             }
 
-            index += length
+            index = cursor
         }
 
         return result
