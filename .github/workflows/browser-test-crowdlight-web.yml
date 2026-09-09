@@ -19,11 +19,11 @@ jobs:
       - name: Install Playwright
         run: |
           npm install --no-save playwright@1.55.0
-          # GitHub's Ubuntu image can carry a Google Chrome APT source whose
-          # mirror metadata changes mid-run. Playwright does not need that
-          # third-party repository to install its own Chromium dependencies.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.list.save
-          npx playwright install --with-deps chromium
+          # ubuntu-latest already carries the libraries Playwright Chromium
+          # needs. Avoid --with-deps here: that runs apt update against
+          # unrelated third-party repositories on the hosted runner and can
+          # fail before CrowdLight tests even start.
+          npx playwright install chromium
 
       - name: Start local CrowdLight server
         run: |
