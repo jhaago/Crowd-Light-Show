@@ -15,6 +15,7 @@ Version: **0.5**
 - Firebase Realtime Database over HTTPS/REST
 - dedicated controller identity + increasing command revisions
 - Firebase server-clock probe using a server timestamp round trip
+- monotonic server-time anchor with automatic 45-second clock refresh
 - stale REST-completion repair
 - renewable single-controller room lease with explicit takeover
 - CoreMIDI multi-packet traversal tests
@@ -25,7 +26,7 @@ Version: **0.5**
 - SEND TEST CUE buttons deliberately write to the configured CrowdLight room
 - TEST MIDI PATH sends unmapped Note 127 through the matching IAC destination and verifies it returns through the selected CoreMIDI input without sending a Firebase show command
 
-Firebase authentication is intentionally not implemented yet while the project remains in controlled prototype testing. Do not use the current open/test-mode configuration for a public event.
+Firebase authentication is intentionally not implemented yet while the project remains in controlled prototype testing. The v0.5 room lease prevents accidental controller fights in cooperating CrowdLight clients, but it is not a security boundary until Firebase Auth/Rules enforce ownership server-side. Do not use the current open/test-mode configuration for a public event.
 
 ## MIDI isolation
 
