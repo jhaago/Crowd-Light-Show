@@ -309,7 +309,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.9.2 • controller lease hardening</div>
+  <div class="footer">CrowdLight prototype v0.9.3 • timing and ownership hardening</div>
 </div>
 
 <script type="module">
@@ -1542,6 +1542,11 @@ function gridRateAllows(effect,tickIndex,periodMs){
   return (((tickIndex%stride)+stride)%stride)===0;
 }
 
+function patternLatenessLimit(periodMs){
+  if(!Number.isFinite(periodMs) || periodMs<=0) return 120;
+  return Math.min(180,Math.max(70,periodMs*0.35));
+}
+
 function samePersistentLease(cmd){
   const a=activeAudienceCommand;
   if(!a || a.token!==audienceCommandVersion || a.mode!==cmd.mode) return false;
@@ -1732,6 +1737,13 @@ function executeCommand(cmd,{clockResync=false}={}){
         patternTimer=setTimeout(async()=>{
           if(!commandStillCurrent(token)) return;
 
+          const latenessMs=nowServer()-target;
+          if(latenessMs>patternLatenessLimit(slotPeriod)){
+            diagEvent('pattern-late-drop',{token,effect:'fireflies',tick:n,latenessMs});
+            if(commandStillCurrent(token)) scheduleFirefly();
+            return;
+          }
+
           const chosen=seeded01(clientSeed ^ 0x3c6ef372,n) < 0.18;
           if(chosen){
             const holdMs=700 + Math.round(seeded01(clientSeed ^ 0xbb67ae85,n)*700);
@@ -1769,9 +1781,13 @@ function executeCommand(cmd,{clockResync=false}={}){
         diagEvent('shimmer-scheduled',{token,tick:n,targetServer:target,delayMs:Math.max(0,target-now),group,groupCount});
         patternTimer=setTimeout(async()=>{
           if(!commandStillCurrent(token)) return;
-          diagEvent('shimmer-callback',{token,tick:n,targetServer:target,latenessMs:nowServer()-target,group,groupCount});
-          if((((n%groupCount)+groupCount)%groupCount)===group){
+          const latenessMs=nowServer()-target;
+          const late=latenessMs>patternLatenessLimit(stepPeriod);
+          diagEvent('shimmer-callback',{token,tick:n,targetServer:target,latenessMs,group,groupCount,late});
+          if(!late && (((n%groupCount)+groupCount)%groupCount)===group){
             await flashTorch(flashMs,()=>commandStillCurrent(token),token);
+          }else if(late){
+            diagEvent('pattern-late-drop',{token,effect:'shimmer',tick:n,latenessMs});
           }
           if(!commandStillCurrent(token)) return;
           scheduleShimmer();
@@ -1803,7 +1819,10 @@ function executeCommand(cmd,{clockResync=false}={}){
           token,effect,tick:n,targetServer:target,latenessMs,effectEligible,gridEligible
         });
 
-        if(effectEligible && gridEligible){
+        const late=latenessMs>patternLatenessLimit(period);
+        if(late){
+          diagEvent('pattern-late-drop',{token,effect,tick:n,latenessMs});
+        }else if(effectEligible && gridEligible){
           await flashTorch(flashMs,()=>commandStillCurrent(token),token);
         }
 
@@ -1876,7 +1895,13 @@ function initAudience(){
       alert(e.message + '\n\nTry the latest Safari/Chrome on a phone with a rear flashlight, and make sure camera permission is allowed.');
     }
   };
-  $('#testBtn').onclick=()=>flashTorch(130,()=>!!track && document.visibilityState!=='hidden');
+  $('#testBtn').onclick=()=>{
+    if(activeAudienceCommand){
+      $('#readyMessage').textContent='TEST MY FLASH is disabled while a live show command is active.';
+      return;
+    }
+    flashTorch(130,()=>!!track && document.visibilityState!=='hidden');
+  };
   $('#leaveBtn').onclick=async()=>{
     if(commandSource) try{commandSource()}catch(e){}
     commandSource=null;
