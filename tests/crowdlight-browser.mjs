@@ -725,6 +725,35 @@ async function testOffFailureStopsStream(browser) {
   await page.close();
 }
 
+async function testNormalHungOnForcesStop(browser) {
+  const page = await makeAudiencePage(browser, true);
+  const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+
+  await page.goto(base + "?test=1", { waitUntil: "networkidle" });
+  await page.click("#joinBtn");
+  await page.waitForSelector("#readyCard:not(.hidden)", { timeout: 4000 });
+
+  await page.evaluate(() => { window.__fakeTorch.hangOn = true; });
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "hung-on-without-blackout",
+    mode: "steady",
+    startAt: Date.now() + 20,
+    validUntil: Date.now() + 6000
+  }));
+
+  await page.waitForTimeout(1500);
+  assert.equal(
+    await page.evaluate(() => window.__fakeTorch.stopped),
+    true,
+    "A normal ON hang did not force-stop the camera stream"
+  );
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false);
+
+  assert.deepEqual(errors, [], "Normal hung-ON test JavaScript errors: " + errors.join(" | "));
+  await page.close();
+}
+
 async function testNormalHungOffForcesStop(browser) {
   const page = await makeAudiencePage(browser, true);
   const errors = [];
@@ -935,6 +964,7 @@ try {
   await testPendingOnBlackout(browser);
   await testHungOnBlackoutForcesStop(browser);
   await testOffFailureStopsStream(browser);
+  await testNormalHungOnForcesStop(browser);
   await testNormalHungOffForcesStop(browser);
   await testExact120BpmWithTorchLatency(browser);
   await testHighBpmDeterministicParityAcrossClients(browser);
