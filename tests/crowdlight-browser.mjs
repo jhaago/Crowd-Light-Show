@@ -380,7 +380,9 @@ async function testAudienceSuccess(browser) {
   assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "Older controller revision overrode newer BLACKOUT");
 
   // A stale lower revision must be ignored BEFORE expiry/schema validation.
-  // It must not fail-safe OFF a newer valid state.
+  // It must not fail-safe OFF a newer valid state. Let the previous physical
+  // ON transition's global safety interval clear before establishing ON.
+  await page.waitForTimeout(520);
   await page.evaluate(() => window.__crowdlightInjectCommand({
     controllerId: "stale-validation-controller",
     revision: 10,
