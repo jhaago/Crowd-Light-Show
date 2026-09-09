@@ -7,6 +7,10 @@ final class FirebaseTransport {
     private let session: URLSession
     private let stateLock = NSLock()
     private var _serverOffsetMs: Double = 0
+    private var _serverAnchorValueMs: Double = 0
+    private var _serverAnchorUptime: TimeInterval = 0
+    private var _serverClockSampleUptime: TimeInterval = 0
+    private var _serverClockReady = false
     private let commandLock = NSLock()
     private var latestCommands: [String: (revision: UInt64, command: [String: Any])] = [:]
     var authToken: String = ""
@@ -30,7 +34,37 @@ final class FirebaseTransport {
     }
 
     func estimatedServerNowMs() -> Double {
-        Date().timeIntervalSince1970 * 1000 + serverOffsetMs
+        stateLock.lock()
+        let ready = _serverClockReady
+        let anchorValue = _serverAnchorValueMs
+        let anchorUptime = _serverAnchorUptime
+        let offset = _serverOffsetMs
+        stateLock.unlock()
+
+        if ready {
+            let elapsed =
+                (ProcessInfo.processInfo.systemUptime - anchorUptime) * 1000
+            return anchorValue + elapsed
+        }
+
+        return Date().timeIntervalSince1970 * 1000 + offset
+    }
+
+    func serverClockAgeMs() -> Double {
+        stateLock.lock()
+        let ready = _serverClockReady
+        let sampleUptime = _serverClockSampleUptime
+        stateLock.unlock()
+
+        guard ready else { return .infinity }
+        return max(
+            0,
+            (ProcessInfo.processInfo.systemUptime - sampleUptime) * 1000
+        )
+    }
+
+    func hasFreshServerClock(maxAgeMs: Double = 120_000) -> Bool {
+        serverClockAgeMs() <= maxAgeMs
     }
 
     func testConnection(
@@ -100,9 +134,11 @@ final class FirebaseTransport {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
             let localStart = Date().timeIntervalSince1970 * 1000
+            let uptimeStart = ProcessInfo.processInfo.systemUptime
 
             session.dataTask(with: request) { [weak self] data, response, error in
                 let localEnd = Date().timeIntervalSince1970 * 1000
+                let uptimeEnd = ProcessInfo.processInfo.systemUptime
 
                 if let error {
                     completion(.failure(error))
@@ -145,8 +181,15 @@ final class FirebaseTransport {
 
                     // Estimate server time at the midpoint of the request.
                     let localMidpoint = (localStart + localEnd) / 2
-                    let offset = number.doubleValue - localMidpoint
-                    self?.setServerOffset(offset)
+                    let uptimeMidpoint = (uptimeStart + uptimeEnd) / 2
+                    let serverAtMidpoint = number.doubleValue
+                    let offset = serverAtMidpoint - localMidpoint
+                    self?.setServerClock(
+                        offset: offset,
+                        serverAtMidpoint: serverAtMidpoint,
+                        uptimeMidpoint: uptimeMidpoint,
+                        sampleUptime: uptimeEnd
+                    )
                     completion(.success(offset))
                 } catch {
                     completion(.failure(BridgeNetworkError.invalidClockResponse))
@@ -429,9 +472,18 @@ final class FirebaseTransport {
         }
     }
 
-    private func setServerOffset(_ value: Double) {
+    private func setServerClock(
+        offset: Double,
+        serverAtMidpoint: Double,
+        uptimeMidpoint: TimeInterval,
+        sampleUptime: TimeInterval
+    ) {
         stateLock.lock()
-        _serverOffsetMs = value
+        _serverOffsetMs = offset
+        _serverAnchorValueMs = serverAtMidpoint
+        _serverAnchorUptime = uptimeMidpoint
+        _serverClockSampleUptime = sampleUptime
+        _serverClockReady = true
         stateLock.unlock()
     }
 
