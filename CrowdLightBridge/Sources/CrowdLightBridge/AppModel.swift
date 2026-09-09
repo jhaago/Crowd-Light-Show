@@ -37,6 +37,8 @@ final class AppModel: ObservableObject {
     private let controllerID = "bridge-" + UUID().uuidString
     private let controlLeaseID = "lease-" + UUID().uuidString
     private var controlLeaseUntil: Double = 0
+    private var controlLeaseDatabaseURL: String = ""
+    private var controlLeaseRoom: String = ""
     private var controlLeaseTimer: Timer?
     private var controlLeaseRequestInFlight = false
     private var pendingControlActions: [(action: CrowdAction, source: String)] = []
@@ -214,7 +216,13 @@ final class AppModel: ObservableObject {
     }
 
     private func hasUsableControlLease() -> Bool {
-        controlLeaseOwned &&
+        let sameDatabase =
+            firebase.normalizedDatabaseURL(databaseURL) == controlLeaseDatabaseURL
+        let sameRoom = cleanRoom(room) == controlLeaseRoom
+
+        return controlLeaseOwned &&
+            sameDatabase &&
+            sameRoom &&
             firebase.estimatedServerNowMs() <
                 controlLeaseUntil - FirebaseTransport.controlLeaseGraceMs
     }
@@ -270,6 +278,9 @@ final class AppModel: ObservableObject {
 
                 case .success(.acquired(let leaseUntil)):
                     self.controlLeaseUntil = leaseUntil
+                    self.controlLeaseDatabaseURL =
+                        self.firebase.normalizedDatabaseURL(self.databaseURL)
+                    self.controlLeaseRoom = self.cleanRoom(self.room)
                     self.controlLeaseOwned = true
                     self.controlLeaseState = "CONTROL OWNED"
                     self.startControlLeaseTimer()
@@ -286,6 +297,13 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             guard self.controlLeaseOwned else { return }
             guard !self.controlLeaseRequestInFlight else { return }
+            guard self.firebase.normalizedDatabaseURL(self.databaseURL) ==
+                    self.controlLeaseDatabaseURL,
+                  self.cleanRoom(self.room) == self.controlLeaseRoom
+            else {
+                self.loseControl("Firebase/room configuration changed. Re-claim control before sending cues.")
+                return
+            }
 
             self.acquireControlLease(force: false) { [weak self] ok in
                 guard let self else { return }
@@ -304,6 +322,8 @@ final class AppModel: ObservableObject {
     private func loseControl(_ reason: String) {
         controlLeaseOwned = false
         controlLeaseUntil = 0
+        controlLeaseDatabaseURL = ""
+        controlLeaseRoom = ""
         controlLeaseState = "CONTROL LOST"
         externalCuesEnabled = false
         pendingControlActions.removeAll()
