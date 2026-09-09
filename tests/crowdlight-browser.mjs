@@ -438,7 +438,10 @@ async function testAudienceSuccess(browser) {
   }));
   await page.waitForTimeout(80);
 
-  // Steady ON and BLACKOUT command handling.
+  // Steady ON and BLACKOUT command handling. Clear the previous physical
+  // ON transition's safety window first so this is testing command handling,
+  // not the global rate gate.
+  await page.waitForTimeout(520);
   await page.evaluate(() => window.__crowdlightInjectCommand({
     id: "steady-1",
     mode: "steady",
