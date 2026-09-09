@@ -552,6 +552,44 @@ async function testAudienceSuccess(browser) {
   const delayedAfter = await page.evaluate(() => window.__fakeTorch.toggles.length);
   assert.equal(delayedAfter, delayedStart, "An overdue scheduled flash executed after event-loop suspension");
 
+  // Pattern lateness: a stalled browser must drop the missed hit rather than
+  // flash visibly off-grid, then rejoin on the next absolute musical target.
+  await page.waitForTimeout(520);
+  const latePatternStart = await page.evaluate(() => window.__fakeTorch.toggles.length);
+  await page.evaluate(() => {
+    const now = Date.now();
+    window.__crowdlightInjectCommand({
+      id: "late-pattern-hit",
+      mode: "pattern",
+      bpm: 90,
+      division: 1,
+      effect: "unison",
+      flashMs: 60,
+      phaseStart: now + 40,
+      startAt: now + 40,
+      validUntil: now + 1800
+    });
+    const stop = performance.now() + 320;
+    while (performance.now() < stop) {}
+  });
+  await page.waitForTimeout(100);
+  let latePatternOns = await page.evaluate(start => (
+    window.__fakeTorch.toggles.slice(start).filter(x => x.on)
+  ), latePatternStart);
+  assert.equal(latePatternOns.length, 0, "Materially late pattern hit flashed off-grid");
+
+  await page.waitForTimeout(450);
+  latePatternOns = await page.evaluate(start => (
+    window.__fakeTorch.toggles.slice(start).filter(x => x.on)
+  ), latePatternStart);
+  assert.ok(latePatternOns.length >= 1, "Pattern did not rejoin the next shared grid target after dropping a late hit");
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-late-pattern",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(80);
+
   // If a persistent command stops being refreshed, the phone must fail safe OFF.
   // Allow the previous flash's global 2 Hz safety interval to clear first.
   await page.waitForTimeout(520);
