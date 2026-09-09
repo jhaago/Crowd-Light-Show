@@ -304,7 +304,7 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.9.0 • expanded crowd effects</div>
+  <div class="footer">CrowdLight prototype v0.9.1 • timing reliability pass</div>
 </div>
 
 <script type="module">
@@ -325,6 +325,11 @@ const DEFAULT_DB = qs.get('db') || localStorage.getItem('crowdlight_db') || BUIL
 const MAX_FLASH_HZ = 2;
 const COMMAND_TTL = 15000;
 const REFRESH_MS = 5000;
+const TORCH_ON_TIMEOUT_MS = 1200;
+const TORCH_OFF_TIMEOUT_MS = 650;
+const RATE_JITTER_TOLERANCE_MS = 12;
+const CLOCK_REARM_THRESHOLD_MS = 35;
+const DIAGNOSTICS = qs.get('diag') === '1';
 
 let room = DEFAULT_ROOM;
 let dbUrl = normalizeDb(DEFAULT_DB);
@@ -355,8 +360,10 @@ let audienceSessionVersion = 0;
 let activeAudienceCommand = null;
 let desiredTorchOn = false;
 let torchQueue = Promise.resolve(true);
-let lastTorchOnMono = -Infinity;
+let lastTorchOnStartMono = -Infinity;
 const MIN_FLASH_GAP_MS = 1000 / MAX_FLASH_HZ;
+const timingDiagnostics = [];
+const MAX_TIMING_DIAGNOSTICS = 400;
 let currentMasterCommand = null;
 let keepAliveTimer = null;
 let masterActionVersion = 0;
@@ -390,12 +397,77 @@ function normalizeDb(url){
 function cleanRoom(r){
   return (r || 'MAIN').toUpperCase().replace(/[^A-Z0-9_-]/g,'').slice(0,24) || 'MAIN';
 }
+function diagEvent(type,data={}){
+  if(!DIAGNOSTICS && !TEST_MODE) return;
+  const entry={
+    type,
+    mono:performance.now(),
+    wall:Date.now(),
+    server:serverClockReady ? nowServer() : null,
+    ...data
+  };
+  timingDiagnostics.push(entry);
+  if(timingDiagnostics.length>MAX_TIMING_DIAGNOSTICS){
+    timingDiagnostics.splice(0,timingDiagnostics.length-MAX_TIMING_DIAGNOSTICS);
+  }
+  const el=$('#timingDiagText');
+  if(el){
+    const age=serverClockAgeMs();
+    el.textContent='Offset '+Math.round(serverOffset)+' ms • sample '+(Number.isFinite(age)?Math.round(age)+' ms':'unavailable')+' old • '+timingDiagnostics.length+' events';
+  }
+}
+function timingDiagnosticsPayload(){
+  return {
+    generatedAt:new Date().toISOString(),
+    room,
+    userAgent:navigator.userAgent,
+    clientSeed,
+    serverOffset,
+    serverClockAgeMs:serverClockAgeMs(),
+    events:timingDiagnostics
+  };
+}
+function downloadTimingDiagnostics(){
+  const blob=new Blob([JSON.stringify(timingDiagnosticsPayload(),null,2)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;
+  a.download='crowdlight-timing-'+Date.now()+'.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function installTimingDiagnosticsUI(){
+  if(!DIAGNOSTICS || IS_MASTER || $('#timingDiagPanel')) return;
+  const host=$('#readyCard');
+  if(!host) return;
+  const panel=document.createElement('div');
+  panel.id='timingDiagPanel';
+  panel.style.cssText='margin-top:14px;padding:12px;border:1px solid rgba(255,255,255,.16);border-radius:10px;background:rgba(0,0,0,.18)';
+  panel.innerHTML='<div style="font-weight:700;margin-bottom:6px">TIMING DIAGNOSTICS</div><div id="timingDiagText" style="font-size:12px;opacity:.82;margin-bottom:8px">Waiting for timing data…</div><button id="downloadTimingDiagBtn" type="button">DOWNLOAD TIMING LOG</button> <button id="clearTimingDiagBtn" type="button">CLEAR</button>';
+  host.appendChild(panel);
+  $('#downloadTimingDiagBtn').onclick=downloadTimingDiagnostics;
+  $('#clearTimingDiagBtn').onclick=()=>{
+    timingDiagnostics.length=0;
+    diagEvent('diagnostics-cleared');
+  };
+}
 function updateServerClock(offset){
+  const hadClock=serverClockReady;
+  const oldNow=hadClock ? nowServer() : null;
   serverOffset=Number(offset)||0;
   serverClockAnchorMono=performance.now();
   serverClockAnchorValue=Date.now()+serverOffset;
   serverClockReady=true;
   serverClockSampleMono=serverClockAnchorMono;
+  const correctionMs=oldNow===null ? 0 : nowServer()-oldNow;
+  diagEvent('clock-sample',{offsetMs:serverOffset,correctionMs});
+  if(hadClock && !IS_MASTER && track && activeAudienceCommand &&
+     document.visibilityState!=='hidden' &&
+     Math.abs(correctionMs)>=CLOCK_REARM_THRESHOLD_MS){
+    rearmActiveAudienceCommandForClockShift(correctionMs);
+  }
 }
 function nowServer(){
   return serverClockAnchorValue + (performance.now()-serverClockAnchorMono);
@@ -606,7 +678,37 @@ async function applyTorchConstraint(trackRef,on){
   return true;
 }
 
+async function applyTorchConstraintBounded(trackRef,on,sessionToken){
+  const timeoutMs=on ? TORCH_ON_TIMEOUT_MS : TORCH_OFF_TIMEOUT_MS;
+  const started=performance.now();
+  diagEvent('torch-constraint-start',{on:!!on,timeoutMs,sessionToken});
+  let timer=0;
+  const operation=applyTorchConstraint(trackRef,on)
+    .then(ok=>({kind:'result',ok:!!ok}))
+    .catch(()=>({kind:'result',ok:false}));
+  const timeout=new Promise(resolve=>{
+    timer=setTimeout(()=>resolve({kind:'timeout',ok:false}),timeoutMs);
+  });
+  const result=await Promise.race([operation,timeout]);
+  if(timer) clearTimeout(timer);
+  const durationMs=performance.now()-started;
+
+  if(result.kind==='timeout'){
+    diagEvent('torch-constraint-timeout',{on:!!on,durationMs,sessionToken});
+    if(sessionToken===audienceSessionVersion && trackRef===track){
+      stopTorchStreamNow('CrowdLight lost confirmation while switching the flashlight '+(on?'on':'off')+'.');
+    }else{
+      try{trackRef.stop()}catch(e){}
+    }
+    return false;
+  }
+
+  diagEvent('torch-constraint-end',{on:!!on,ok:!!result.ok,durationMs,sessionToken});
+  return !!result.ok;
+}
+
 function stopTorchStreamNow(reason=''){
+  diagEvent('stream-stop',{reason});
   audienceSessionVersion++;
   audienceCommandVersion++;
   activeAudienceCommand=null;
@@ -651,15 +753,25 @@ async function reconcileTorch(sessionToken, ratePolicy='delay'){
     if(torchOn===wanted) return true;
 
     if(wanted){
-      const gap=performance.now()-lastTorchOnMono;
+      const gap=performance.now()-lastTorchOnStartMono;
       if(gap < MIN_FLASH_GAP_MS){
-        if(ratePolicy==='drop') return false;
-        await sleep(MIN_FLASH_GAP_MS-gap);
+        const remaining=MIN_FLASH_GAP_MS-gap;
+        if(ratePolicy==='drop' && remaining>RATE_JITTER_TOLERANCE_MS){
+          diagEvent('rate-drop',{gapMs:gap,remainingMs:remaining});
+          return false;
+        }
+        diagEvent('rate-wait',{gapMs:gap,remainingMs:remaining});
+        await sleep(remaining);
         if(sessionToken!==audienceSessionVersion || !desiredTorchOn) continue;
       }
+      // Measure the safety interval from the final physical ON request boundary,
+      // not from Promise completion. Promise latency varies between phones and
+      // must not decide which musical beat survives at the exact 2 Hz boundary.
+      lastTorchOnStartMono=performance.now();
+      diagEvent('torch-on-boundary',{sessionToken});
     }
 
-    const ok=await applyTorchConstraint(trackRef,wanted);
+    const ok=await applyTorchConstraintBounded(trackRef,wanted,sessionToken);
 
     // If this operation belonged to an old stream/session, make a best-effort
     // OFF request against the captured track and never update current state.
@@ -680,7 +792,7 @@ async function reconcileTorch(sessionToken, ratePolicy='delay'){
 
     torchOn=wanted;
     $('#flashOverlay').classList.toggle('show',wanted);
-    if(wanted) lastTorchOnMono=performance.now();
+    diagEvent('torch-state',{on:wanted,sessionToken});
 
     // The desired state may have changed while applyConstraints() was pending.
     // Loop immediately so a newer BLACKOUT/OFF always wins.
@@ -697,15 +809,30 @@ function setTorch(on,{ratePolicy='delay'}={}){
   return torchQueue;
 }
 
-async function flashTorch(ms=90,isCurrent=()=>true){
+async function flashTorch(ms=90,isCurrent=()=>true,ownerToken=null){
   if(!isCurrent()) return false;
   const onOk=await setTorch(true,{ratePolicy:'drop'});
-  if(!onOk || !isCurrent()) return false;
+  if(!onOk) return false;
+
+  // If authority was lost while ON was being applied, clean up only when the
+  // stale flash still owns the active command or the newer desired state is OFF.
+  if(!isCurrent()){
+    if((ownerToken!==null && activeAudienceCommand?.token===ownerToken) || !desiredTorchOn){
+      await setTorch(false);
+    }
+    return false;
+  }
 
   await sleep(ms);
-  if(!isCurrent()) return false;
 
-  return setTorch(false);
+  // Freshness gates ON. OFF cleanup is intentionally less restrictive: if this
+  // same command still owns the torch, crossing a one-shot freshness boundary
+  // must never leave it illuminated until lease expiry.
+  if(isCurrent() || (ownerToken!==null && activeAudienceCommand?.token===ownerToken)){
+    return setTorch(false);
+  }
+  if(!desiredTorchOn) await setTorch(false);
+  return false;
 }
 
 async function releaseTorch(){
@@ -1054,6 +1181,20 @@ function clearPattern(){
   clearAudienceTimers();
 }
 
+function rearmActiveAudienceCommandForClockShift(correctionMs){
+  const current=activeAudienceCommand;
+  if(!current || (current.mode!=='pattern' && current.mode!=='steady')) return;
+  const cmd={...current};
+  delete cmd.token;
+  diagEvent('clock-rearm',{
+    correctionMs,
+    mode:cmd.mode,
+    effect:cmd.effect || null,
+    revision:Number(cmd.revision)||0
+  });
+  executeCommand(cmd,{clockResync:true});
+}
+
 function failSafeAudienceOff(reason=''){
   const offVersion=++audienceCommandVersion;
   const sessionToken=audienceSessionVersion;
@@ -1127,6 +1268,20 @@ function validateCommand(cmd){
   return {ok:true};
 }
 
+function gridRateAllows(effect,tickIndex,periodMs){
+  if(!Number.isFinite(periodMs) || periodMs<=0) return false;
+  if(periodMs+0.001>=MIN_FLASH_GAP_MS) return true;
+
+  // DROP and CONSTELLATION already select a given phone only once every four
+  // pattern ticks, which is safely below 2 Hz throughout the supported range.
+  if((effect==='drop' || effect==='constellation') && periodMs*4+0.001>=MIN_FLASH_GAP_MS){
+    return true;
+  }
+
+  const stride=Math.max(1,Math.ceil(MIN_FLASH_GAP_MS/periodMs));
+  return (((tickIndex%stride)+stride)%stride)===0;
+}
+
 function samePersistentLease(cmd){
   const a=activeAudienceCommand;
   if(!a || a.token!==audienceCommandVersion || a.mode!==cmd.mode) return false;
@@ -1162,6 +1317,16 @@ function commandStillCurrent(token,{oneShot=false}={}){
 function receiveCommand(cmd,source){
   if(!track) return;
 
+  diagEvent('command-received',{
+    source,
+    mode:cmd?.mode || null,
+    effect:cmd?.effect || null,
+    controllerId:cmd?.controllerId || null,
+    revision:Number(cmd?.revision)||0,
+    startAt:Number(cmd?.startAt)||null,
+    phaseStart:Number(cmd?.phaseStart)||null
+  });
+
   const validity=validateCommand(cmd);
   if(!validity.ok){
     failSafeAudienceOff('Invalid or stale show command. Waiting for a fresh controller command…');
@@ -1194,10 +1359,17 @@ function receiveCommand(cmd,source){
   executeCommand(cmd);
 }
 
-function executeCommand(cmd){
+function executeCommand(cmd,{clockResync=false}={}){
   clearAudienceTimers();
   const token=++audienceCommandVersion;
   activeAudienceCommand={...cmd,token};
+  diagEvent(clockResync?'command-rearmed':'command-execute',{
+    token,
+    mode:cmd.mode,
+    effect:cmd.effect || null,
+    startAt:Number(cmd.startAt)||null,
+    phaseStart:Number(cmd.phaseStart)||null
+  });
 
   if(cmd.mode==='off'){
     failSafeAudienceOff();
@@ -1225,7 +1397,7 @@ function executeCommand(cmd){
     const flashMs=Math.min(250,Math.max(35,Number(cmd.flashMs)));
     patternTimer=setTimeout(async()=>{
       if(!commandStillCurrent(token,{oneShot:true})) return;
-      await flashTorch(flashMs,()=>commandStillCurrent(token,{oneShot:true}));
+      await flashTorch(flashMs,()=>commandStillCurrent(token,{oneShot:true}),token);
       if(token===audienceCommandVersion) activeAudienceCommand=null;
     },delay);
     return;
@@ -1260,6 +1432,7 @@ function executeCommand(cmd){
           ? (n%2===0)
           : (((n%2)+2)%2)===group;
 
+        diagEvent('state-boundary',{token,effect,index:n,wantOn,targetServer:boundary,nextServer:nextBoundary});
         setTorch(wantOn,{ratePolicy:'delay'}).catch(()=>{});
 
         patternTimer=setTimeout(()=>{
@@ -1322,10 +1495,12 @@ function executeCommand(cmd){
         if(!Number.isFinite(n)||n<0)n=0;
         const target=phase+n*stepPeriod;
 
+        diagEvent('shimmer-scheduled',{token,tick:n,targetServer:target,delayMs:Math.max(0,target-now),group,groupCount});
         patternTimer=setTimeout(async()=>{
           if(!commandStillCurrent(token)) return;
+          diagEvent('shimmer-callback',{token,tick:n,targetServer:target,latenessMs:nowServer()-target,group,groupCount});
           if((((n%groupCount)+groupCount)%groupCount)===group){
-            await flashTorch(flashMs,()=>commandStillCurrent(token));
+            await flashTorch(flashMs,()=>commandStillCurrent(token),token);
           }
           if(!commandStillCurrent(token)) return;
           scheduleShimmer();
@@ -1346,11 +1521,19 @@ function executeCommand(cmd){
       const target=phase+n*period;
       const delay=Math.max(0,target-now);
 
+      diagEvent('pattern-scheduled',{token,effect,tick:n,targetServer:target,delayMs:delay});
       patternTimer=setTimeout(async()=>{
         if(!commandStillCurrent(token)) return;
 
-        if(effectShouldFlash(effect,n)){
-          await flashTorch(flashMs,()=>commandStillCurrent(token));
+        const latenessMs=nowServer()-target;
+        const effectEligible=effectShouldFlash(effect,n);
+        const gridEligible=gridRateAllows(effect,n,period);
+        diagEvent('pattern-callback',{
+          token,effect,tick:n,targetServer:target,latenessMs,effectEligible,gridEligible
+        });
+
+        if(effectEligible && gridEligible){
+          await flashTorch(flashMs,()=>commandStillCurrent(token),token);
         }
 
         if(!commandStillCurrent(token)) return;
@@ -1365,6 +1548,7 @@ function executeCommand(cmd){
 function initAudience(){
   room=DEFAULT_ROOM; dbUrl=normalizeDb(DEFAULT_DB);
   openLocalChannel();
+  installTimingDiagnosticsUI();
   $('#audienceRoom').textContent=room;
   const secure = location.protocol==='https:' || location.hostname==='localhost' || location.protocol==='file:';
   $('#secureCheck').className='check '+(secure?'good':'bad');
@@ -1393,6 +1577,16 @@ function initAudience(){
       await sleep(160);
       const offOk=await setTorch(false);
       if(!offOk) throw new Error('The flashlight test could not be completed reliably.');
+
+      // Do not let different confirmation-flash completion times decide which
+      // show beat a phone is allowed to use. Finish the global safety window
+      // before subscribing to live commands.
+      const confirmationGap=performance.now()-lastTorchOnStartMono;
+      const confirmationWait=Math.max(0,MIN_FLASH_GAP_MS-confirmationGap);
+      if(confirmationWait>0){
+        diagEvent('confirmation-safety-wait',{waitMs:confirmationWait});
+        await sleep(confirmationWait);
+      }
 
       $('#joinCard').classList.add('hidden');
       $('#readyCard').classList.remove('hidden');
@@ -1876,13 +2070,16 @@ function registerOnset(now,energy,avg,sd){
 
 // Test-only state inspection. This is inert unless ?test=1 is explicitly
 // present and is never included in generated audience links.
+window.__crowdlightGetTimingDiagnostics=()=>JSON.parse(JSON.stringify(timingDiagnosticsPayload()));
 if(TEST_MODE){
+  window.__crowdlightTestSetServerOffset=offset=>updateServerClock(Number(offset)||0);
   window.__crowdlightTestState=()=>({
     audienceCommandVersion,
     audienceSessionVersion,
     activeAudienceCommand: activeAudienceCommand ? JSON.parse(JSON.stringify(activeAudienceCommand)) : null,
     desiredTorchOn,
     torchOn,
+    lastTorchOnStartMono,
     serverClockReady,
     serverClockAgeMs:serverClockAgeMs(),
     currentMasterCommand: currentMasterCommand ? JSON.parse(JSON.stringify(currentMasterCommand)) : null,
