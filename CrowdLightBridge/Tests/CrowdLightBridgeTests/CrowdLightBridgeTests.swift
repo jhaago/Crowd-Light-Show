@@ -42,11 +42,16 @@ final class CrowdLightBridgeTests: XCTestCase {
         XCTAssertEqual(CueMapping.noteName(36), "C2")
     }
 
-    func testLoopbackDiagnosticBuildsUnmappedChannel16Note() {
+    func testLoopbackDiagnosticBuildsReservedChannel16NotePair() {
         XCTAssertEqual(
             MIDIManager.noteOnBytes(note: 127, channel: 16, velocity: 100),
             [0x9F, 127, 100]
         )
+        XCTAssertEqual(
+            MIDIManager.noteOffBytes(note: 127, channel: 16),
+            [0x8F, 127, 0]
+        )
+        XCTAssertFalse(CueMapping.defaults.contains(where: { $0.note == 127 }))
     }
 
     func testLoopbackDestinationMatchingPrefersExactName() {
@@ -59,13 +64,12 @@ final class CrowdLightBridgeTests: XCTestCase {
         )
     }
 
-    func testLoopbackDestinationMatchingAllowsSingleCrowdLightDestination() {
-        XCTAssertEqual(
+    func testLoopbackDestinationMatchingRequiresExactSelectedSourceName() {
+        XCTAssertNil(
             MIDIManager.bestDestinationIndex(
                 sourceName: "Different Source Label",
                 destinationNames: ["Other", "IAC Driver CrowdLight"]
-            ),
-            1
+            )
         )
         XCTAssertNil(
             MIDIManager.bestDestinationIndex(
@@ -167,6 +171,21 @@ final class CrowdLightBridgeTests: XCTestCase {
         XCTAssertEqual(
             events,
             [ParsedMIDINoteOn(note: 28, channel: 1, velocity: 90)]
+        )
+    }
+
+    func testMIDIParserAllowsRealtimeByteInsideNoteOn() {
+        let events = MIDIManager.parseNoteOns(bytes: [
+            0x9F, 31, 0xF8, 100,
+            0x9F, 32, 0xFE, 90
+        ])
+
+        XCTAssertEqual(
+            events,
+            [
+                ParsedMIDINoteOn(note: 31, channel: 16, velocity: 100),
+                ParsedMIDINoteOn(note: 32, channel: 16, velocity: 90)
+            ]
         )
     }
 
