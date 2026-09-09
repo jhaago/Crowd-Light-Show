@@ -439,7 +439,7 @@ function downloadTimingDiagnostics(){
   setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
 function installTimingDiagnosticsUI(){
-  if(!DIAGNOSTICS || IS_MASTER || $('#timingDiagPanel')) return;
+  if(!DIAGNOSTICS || IS_MASTER || document.getElementById('timingDiagPanel')) return;
   const host=$('#readyCard');
   if(!host) return;
   const panel=document.createElement('div');
