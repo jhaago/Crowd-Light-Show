@@ -75,6 +75,70 @@ final class CrowdLightBridgeTests: XCTestCase {
         )
     }
 
+    func testRoomLeaseAcquisitionRules() {
+        let now = 1_000_000.0
+
+        XCTAssertTrue(
+            FirebaseTransport.canAcquireLease(
+                currentControllerID: nil,
+                currentLeaseID: nil,
+                currentLeaseUntil: nil,
+                requestControllerID: "bridge-a",
+                requestLeaseID: "lease-a",
+                now: now,
+                force: false
+            )
+        )
+
+        XCTAssertFalse(
+            FirebaseTransport.canAcquireLease(
+                currentControllerID: "web-master",
+                currentLeaseID: "web-lease",
+                currentLeaseUntil: now + 10_000,
+                requestControllerID: "bridge-a",
+                requestLeaseID: "lease-a",
+                now: now,
+                force: false
+            )
+        )
+
+        XCTAssertTrue(
+            FirebaseTransport.canAcquireLease(
+                currentControllerID: "bridge-a",
+                currentLeaseID: "lease-a",
+                currentLeaseUntil: now + 10_000,
+                requestControllerID: "bridge-a",
+                requestLeaseID: "lease-a",
+                now: now,
+                force: false
+            )
+        )
+
+        XCTAssertTrue(
+            FirebaseTransport.canAcquireLease(
+                currentControllerID: "web-master",
+                currentLeaseID: "web-lease",
+                currentLeaseUntil: now - 2_000,
+                requestControllerID: "bridge-a",
+                requestLeaseID: "lease-a",
+                now: now,
+                force: false
+            )
+        )
+
+        XCTAssertTrue(
+            FirebaseTransport.canAcquireLease(
+                currentControllerID: "web-master",
+                currentLeaseID: "web-lease",
+                currentLeaseUntil: now + 10_000,
+                requestControllerID: "bridge-a",
+                requestLeaseID: "lease-a",
+                now: now,
+                force: true
+            )
+        )
+    }
+
     func testMIDIParserHandlesMultipleMessagesAndVelocityZero() {
         let events = MIDIManager.parseNoteOns(bytes: [
             0x9F, 24, 100,
