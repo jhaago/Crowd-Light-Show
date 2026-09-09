@@ -20,6 +20,8 @@ final class AppModel: ObservableObject {
     @Published var currentState: String = "NO COMMAND SENT"
     @Published var lastCue: String = "No cue received"
     @Published var midiLoopbackState: String = "Not tested"
+    @Published var controlLeaseState: String = "Not claimed"
+    @Published var controlLeaseOwned: Bool = false
     @Published var logs: [BridgeLogEntry] = []
 
     let cueMappings = CueMapping.defaults
@@ -33,6 +35,11 @@ final class AppModel: ObservableObject {
     private var actionVersion: UInt64 = 0
     private var controllerRevision: UInt64 = 0
     private let controllerID = "bridge-" + UUID().uuidString
+    private let controlLeaseID = "lease-" + UUID().uuidString
+    private var controlLeaseUntil: Double = 0
+    private var controlLeaseTimer: Timer?
+    private var controlLeaseRequestInFlight = false
+    private var pendingControlActions: [(action: CrowdAction, source: String)] = []
     private var midiLoopbackToken: UUID?
     private var midiLoopbackExpectedChannel: Int?
     private let midiLoopbackNote = 127
@@ -53,12 +60,7 @@ final class AppModel: ObservableObject {
             self?.handleMIDI(note: note, channel: channel, velocity: velocity)
         }
         midi.onSourceLost = { [weak self] in
-            guard let self else { return }
-            self.externalCuesEnabled = false
-            self.midiLoopbackToken = nil
-            self.midiLoopbackExpectedChannel = nil
-            self.midiLoopbackState = "FAILED • MIDI source lost"
-            self.log("MIDI source lost. External cues were automatically DISARMED.", success: false)
+            self?.handleMIDISourceLoss()
         }
 
         NotificationCenter.default.addObserver(
@@ -72,6 +74,7 @@ final class AppModel: ObservableObject {
 
     deinit {
         keepAliveTimer?.invalidate()
+        controlLeaseTimer?.invalidate()
         restoreWorkItem?.cancel()
     }
 
@@ -172,8 +175,158 @@ final class AppModel: ObservableObject {
     }
 
     func toggleExternalCues() {
-        externalCuesEnabled.toggle()
-        log("External ProPresenter cues \(externalCuesEnabled ? "ENABLED" : "DISABLED").", success: externalCuesEnabled)
+        if externalCuesEnabled {
+            externalCuesEnabled = false
+            log("External ProPresenter cues DISABLED.", success: nil)
+            return
+        }
+
+        acquireControlLease(force: false) { [weak self] ok in
+            guard let self else { return }
+            if ok {
+                self.externalCuesEnabled = true
+                self.log("External ProPresenter cues ENABLED with room control.", success: true)
+            } else {
+                self.externalCuesEnabled = false
+                self.log("External cues remain DISABLED because another controller owns the room.", success: false)
+            }
+        }
+    }
+
+    func claimControl() {
+        acquireControlLease(force: false) { [weak self] ok in
+            guard let self else { return }
+            self.log(
+                ok ? "CrowdLight room control claimed." : "Could not claim room control.",
+                success: ok
+            )
+        }
+    }
+
+    func takeControl() {
+        acquireControlLease(force: true) { [weak self] ok in
+            guard let self else { return }
+            self.log(
+                ok ? "CrowdLight room control TAKEN OVER explicitly." : "Could not take control of the room.",
+                success: ok
+            )
+        }
+    }
+
+    private func hasUsableControlLease() -> Bool {
+        controlLeaseOwned &&
+            firebase.estimatedServerNowMs() <
+                controlLeaseUntil - FirebaseTransport.controlLeaseGraceMs
+    }
+
+    private func acquireControlLease(
+        force: Bool,
+        completion: @escaping (Bool) -> Void
+    ) {
+        if !force, hasUsableControlLease() {
+            completion(true)
+            return
+        }
+
+        guard !controlLeaseRequestInFlight else {
+            completion(false)
+            return
+        }
+
+        controlLeaseRequestInFlight = true
+        firebase.acquireRoomLease(
+            databaseURL: databaseURL,
+            room: room,
+            controllerID: controllerID,
+            leaseID: controlLeaseID,
+            force: force
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.controlLeaseRequestInFlight = false
+
+                switch result {
+                case .failure(let error):
+                    let previouslyOwned = self.controlLeaseOwned
+                    if previouslyOwned &&
+                        self.firebase.estimatedServerNowMs() >=
+                            self.controlLeaseUntil - FirebaseTransport.controlLeaseGraceMs {
+                        self.loseControl("Controller lease renewal failed: \(error.localizedDescription)")
+                    } else {
+                        self.controlLeaseState = "Lease error"
+                        self.log("Controller lease error: \(error.localizedDescription)", success: false)
+                    }
+                    completion(false)
+
+                case .success(.held(let ownerType, _, let leaseUntil)):
+                    self.controlLeaseUntil = leaseUntil
+                    if self.controlLeaseOwned {
+                        self.loseControl("Room control was taken by another \(ownerType) controller.")
+                    } else {
+                        self.controlLeaseOwned = false
+                        self.controlLeaseState = "Held by \(ownerType.uppercased())"
+                    }
+                    completion(false)
+
+                case .success(.acquired(let leaseUntil)):
+                    self.controlLeaseUntil = leaseUntil
+                    self.controlLeaseOwned = true
+                    self.controlLeaseState = "CONTROL OWNED"
+                    self.startControlLeaseTimer()
+                    completion(true)
+                }
+            }
+        }
+    }
+
+    private func startControlLeaseTimer() {
+        guard controlLeaseTimer == nil else { return }
+
+        let timer = Timer(timeInterval: 4.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            guard self.controlLeaseOwned else { return }
+            guard !self.controlLeaseRequestInFlight else { return }
+
+            self.acquireControlLease(force: false) { [weak self] ok in
+                guard let self else { return }
+                if !ok,
+                   self.firebase.estimatedServerNowMs() >=
+                    self.controlLeaseUntil - FirebaseTransport.controlLeaseGraceMs {
+                    self.loseControl("Controller lease expired. Bridge show commands stopped.")
+                }
+            }
+        }
+
+        controlLeaseTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func loseControl(_ reason: String) {
+        controlLeaseOwned = false
+        controlLeaseUntil = 0
+        controlLeaseState = "CONTROL LOST"
+        externalCuesEnabled = false
+        pendingControlActions.removeAll()
+        controlLeaseTimer?.invalidate()
+        controlLeaseTimer = nil
+        stopPersistentMode()
+        currentState = "CONTROL LOST"
+        log(reason, success: false)
+    }
+
+    private func handleMIDISourceLoss() {
+        externalCuesEnabled = false
+        midiLoopbackToken = nil
+        midiLoopbackExpectedChannel = nil
+        midiLoopbackState = "FAILED • MIDI source lost"
+
+        let owned = hasUsableControlLease()
+        stopPersistentMode()
+        log("MIDI source lost. External cues were automatically DISARMED.", success: false)
+
+        if owned {
+            performSend(action: .blackout, source: "MIDI source loss fail-safe")
+        }
     }
 
     func simulateCue(_ mapping: CueMapping) {
@@ -217,6 +370,31 @@ final class AppModel: ObservableObject {
     }
 
     private func send(action: CrowdAction, source: String) {
+        if hasUsableControlLease() {
+            performSend(action: action, source: source)
+            return
+        }
+
+        pendingControlActions.append((action: action, source: source))
+        guard !controlLeaseRequestInFlight else { return }
+
+        acquireControlLease(force: false) { [weak self] ok in
+            guard let self else { return }
+            let queued = self.pendingControlActions
+            self.pendingControlActions.removeAll()
+
+            guard ok else {
+                self.log("Show command blocked because another controller owns this room.", success: false)
+                return
+            }
+
+            for item in queued {
+                self.performSend(action: item.action, source: item.source)
+            }
+        }
+    }
+
+    private func performSend(action: CrowdAction, source: String) {
         saveSettings()
         actionVersion &+= 1
         let thisActionVersion = actionVersion
@@ -234,7 +412,10 @@ final class AppModel: ObservableObject {
             sendCommand(command, description: "BLACKOUT", source: source)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                guard let self, self.actionVersion == thisActionVersion else { return }
+                guard let self,
+                      self.actionVersion == thisActionVersion,
+                      self.hasUsableControlLease()
+                else { return }
                 self.firebase.sendCommand(
                     databaseURL: self.databaseURL,
                     room: self.room,
@@ -275,6 +456,9 @@ final class AppModel: ObservableObject {
                     restored["revision"] = self.controllerRevision
                     restored["issuedAt"] = self.firebase.estimatedServerNowMs()
                     restored["validUntil"] = self.firebase.estimatedServerNowMs() + 15_000
+                    restored["leaseId"] = self.controlLeaseID
+                    restored["leaseUntil"] = self.controlLeaseUntil
+                    let restoreRevision = self.controllerRevision
                     self.persistentCommand = restored
                     self.persistentAction = previousAction
                     self.currentState = self.displayState(for: previousAction, command: restored)
@@ -286,6 +470,7 @@ final class AppModel: ObservableObject {
                     ) { result in
                         if case .failure(let error) = result {
                             DispatchQueue.main.async {
+                                guard restoreRevision == self.controllerRevision else { return }
                                 self.firebaseConnected = false
                                 self.firebaseState = "Write failed"
                                 self.log("Restore after SYNC FLASH failed: \(error.localizedDescription)", success: false)
@@ -329,6 +514,8 @@ final class AppModel: ObservableObject {
             "room": cleanRoom(room),
             "issuedAt": now,
             "validUntil": now + ttlMs,
+            "leaseId": controlLeaseID,
+            "leaseUntil": controlLeaseUntil,
             "bridge": "macOS"
         ]
     }
@@ -345,12 +532,18 @@ final class AppModel: ObservableObject {
 
         let timer = Timer(timeInterval: 5.0, repeats: true) { [weak self] _ in
             guard let self, var refreshed = self.persistentCommand else { return }
+            guard self.hasUsableControlLease() else {
+                self.loseControl("Persistent mode stopped because the controller lease is no longer valid.")
+                return
+            }
             refreshed["id"] = UUID().uuidString
             self.controllerRevision &+= 1
             let revision = self.controllerRevision
             refreshed["revision"] = revision
             refreshed["issuedAt"] = self.firebase.estimatedServerNowMs()
             refreshed["validUntil"] = self.firebase.estimatedServerNowMs() + 15_000
+            refreshed["leaseId"] = self.controlLeaseID
+            refreshed["leaseUntil"] = self.controlLeaseUntil
             self.persistentCommand = refreshed
 
             self.firebase.sendCommand(
