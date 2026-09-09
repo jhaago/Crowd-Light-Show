@@ -1387,6 +1387,19 @@ function handleRoomSnapshot(cmd,lease,source){
       return;
     }
     if(!commandMatchesLease(cmd,lease)){
+      const current=activeAudienceCommand;
+      const currentStillAuthoritative=!!current &&
+        current.controllerId===lease.controllerId &&
+        (current.leaseId||'')===lease.leaseId &&
+        nowServer()<=Number(current.validUntil)+80;
+      if(currentStillAuthoritative){
+        diagEvent('foreign-command-ignored',{
+          controllerId:cmd?.controllerId || null,
+          revision:Number(cmd?.revision)||0,
+          leaseControllerId:lease.controllerId
+        });
+        return;
+      }
       failSafeAudienceOff('Ignoring a command from a controller that does not own this room.');
       return;
     }
@@ -2003,6 +2016,10 @@ async function masterOff(){
 
 async function masterOn(){
   const actionVersion=beginMasterAction();
+  if(IS_MASTER && !await ensureMasterLease(false)){
+    showCommandResult('ALL LIGHTS ON was not sent because another controller owns this room.',false);
+    return;
+  }
   musicSyncRunning=false;
   $('#musicSyncBtn').textContent='START MUSIC SYNC';
   $('#startBpmBtn').textContent='START BPM FLASHING';
@@ -2078,6 +2095,10 @@ async function masterFlash(){
 
 async function masterPattern(phaseWall=0,bpmOverride=0,phaseServerOverride=0){
   const actionVersion=beginMasterAction();
+  if(IS_MASTER && !await ensureMasterLease(false)){
+    showCommandResult('Pattern was not started because another controller owns this room.',false);
+    return;
+  }
   let bpm=bpmOverride || +$('#bpmRange').value;
   const flashMs=+$('#flashMsRange').value;
   const musicalPeriod=(60000/bpm)*division;
@@ -2356,6 +2377,7 @@ if(TEST_MODE){
     observedControlLease=window.__crowdlightTestControlLease;
     updateMasterLeaseUI(observedControlLease);
   };
+  window.__crowdlightInjectRoomSnapshot=(command,lease)=>handleRoomSnapshot(command,lease,'test');
   window.__crowdlightTestState=()=>({
     audienceCommandVersion,
     audienceSessionVersion,
