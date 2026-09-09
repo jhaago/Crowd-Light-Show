@@ -856,8 +856,12 @@ async function testHighBpmDeterministicParityAcrossClients(browser) {
   assert.ok(onsA.length >= 2 && onsB.length >= 2, "180 BPM deterministic-parity test did not produce enough flashes");
 
   const tickPeriod = 60000 / 180;
-  const ticksA = onsA.map(t => Math.round((t - phase) / tickPeriod));
-  const ticksB = onsB.map(t => Math.round((t - phase) / tickPeriod));
+  const normalizeTick = t => {
+    const n = Math.round((t - phase) / tickPeriod);
+    return Object.is(n, -0) ? 0 : n;
+  };
+  const ticksA = onsA.map(normalizeTick);
+  const ticksB = onsB.map(normalizeTick);
   assert.deepEqual(ticksA.slice(0, 2), ticksB.slice(0, 2), "Two clients selected different high-BPM beat parity");
   assert.equal(ticksA.slice(0, 2).every(n => n % 2 === 0), true, "High-BPM UNISON did not use deterministic even grid ticks");
 
