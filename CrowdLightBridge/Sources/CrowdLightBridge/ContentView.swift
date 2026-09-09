@@ -45,7 +45,7 @@ struct ContentView: View {
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 2) {
-                Text("v0.4")
+                Text("v0.5")
                     .font(.caption)
                     .fontWeight(.semibold)
                 Text("macOS 11+")
@@ -205,7 +205,19 @@ struct ContentView: View {
                     Button("Test Firebase") { model.testFirebase() }
                 }
 
-                Text("v0.4 uses the current Firebase test-mode database. TEST MIDI PATH uses an unmapped diagnostic note and does not send a show command.")
+                HStack(spacing: 10) {
+                    Text("Room control")
+                        .frame(width: 95, alignment: .leading)
+                    Button("CLAIM CONTROL") { model.claimControl() }
+                    Button("TAKE CONTROL") { model.takeControl() }
+                    Text(model.controlLeaseState)
+                        .font(.caption)
+                        .fontWeight(model.controlLeaseOwned ? .semibold : .regular)
+                        .foregroundColor(model.controlLeaseOwned ? .green : .secondary)
+                    Spacer()
+                }
+
+                Text("v0.5 uses a renewable single-controller room lease. Enabling ProPresenter cues or sending a manual cue claims control if the room is free; TAKE CONTROL is an explicit override.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
