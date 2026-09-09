@@ -40,6 +40,7 @@ final class AppModel: ObservableObject {
     private var controlLeaseDatabaseURL: String = ""
     private var controlLeaseRoom: String = ""
     private var controlLeaseTimer: Timer?
+    private var clockRefreshTimer: Timer?
     private var controlLeaseRequestInFlight = false
     private var pendingControlActions: [(action: CrowdAction, source: String)] = []
     private var midiLoopbackToken: UUID?
@@ -77,6 +78,7 @@ final class AppModel: ObservableObject {
     deinit {
         keepAliveTimer?.invalidate()
         controlLeaseTimer?.invalidate()
+        clockRefreshTimer?.invalidate()
         restoreWorkItem?.cancel()
     }
 
@@ -152,19 +154,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func configurationKey() -> String {
+        firebase.normalizedDatabaseURL(databaseURL) + "|" + cleanRoom(room)
+    }
+
     func testFirebase() {
         firebaseState = "Testing…"
         firebaseConnected = false
         saveSettings()
+        let configKey = configurationKey()
 
         firebase.testConnection(databaseURL: databaseURL, room: room) { [weak self] result in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.configurationKey() == configKey else { return }
                 switch result {
                 case .success(let offset):
                     self.firebaseConnected = true
                     self.firebaseState = "Connected • TEST MODE"
                     self.clockOffsetText = String(format: "%+.0f ms", offset)
+                    self.startClockRefreshTimer()
                     self.log("Firebase write test succeeded. Server offset \(self.clockOffsetText).", success: true)
                 case .failure(let error):
                     self.firebaseConnected = false
@@ -175,6 +183,54 @@ final class AppModel: ObservableObject {
             }
         }
     }
+
+    private func startClockRefreshTimer() {
+        clockRefreshTimer?.invalidate()
+
+        let timer = Timer(timeInterval: 45.0, repeats: true) { [weak self] _ in
+            self?.refreshServerClock(periodic: true)
+        }
+        clockRefreshTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func refreshServerClock(
+        periodic: Bool,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        let configKey = configurationKey()
+        firebase.fetchServerOffset(
+            databaseURL: databaseURL,
+            room: room
+        ) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, self.configurationKey() == configKey else {
+                    completion?(false)
+                    return
+                }
+
+                switch result {
+                case .success(let offset):
+                    self.clockOffsetText = String(format: "%+.0f ms", offset)
+                    if !periodic {
+                        self.log("Firebase server clock refreshed: \(self.clockOffsetText).", success: true)
+                    }
+                    completion?(true)
+
+                case .failure(let error):
+                    if self.firebase.serverClockAgeMs() > 120_000 {
+                        self.clockOffsetText = "STALE"
+                        self.firebaseState = "Clock stale"
+                    }
+                    if !periodic {
+                        self.log("Server clock refresh failed: \(error.localizedDescription)", success: false)
+                    }
+                    completion?(false)
+                }
+            }
+        }
+    }
+
 
     func toggleExternalCues() {
         if externalCuesEnabled {
@@ -223,6 +279,7 @@ final class AppModel: ObservableObject {
         return controlLeaseOwned &&
             sameDatabase &&
             sameRoom &&
+            firebase.hasFreshServerClock() &&
             firebase.estimatedServerNowMs() <
                 controlLeaseUntil - FirebaseTransport.controlLeaseGraceMs
     }
@@ -238,6 +295,21 @@ final class AppModel: ObservableObject {
 
         guard !controlLeaseRequestInFlight else {
             completion(false)
+            return
+        }
+
+        if !firebase.hasFreshServerClock() {
+            controlLeaseRequestInFlight = true
+            refreshServerClock(periodic: false) { [weak self] ok in
+                guard let self else { return }
+                self.controlLeaseRequestInFlight = false
+                guard ok else {
+                    self.controlLeaseState = "CLOCK NOT READY"
+                    completion(false)
+                    return
+                }
+                self.acquireControlLease(force: force, completion: completion)
+            }
             return
         }
 
