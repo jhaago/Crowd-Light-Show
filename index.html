@@ -282,8 +282,13 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
             <button class="secondary" id="saveConfigBtn">SAVE</button>
             <button class="ghost" id="copyLinkBtn">COPY CROWD LINK</button>
           </div>
+          <div class="smallBtns">
+            <button class="secondary" id="claimControlBtn">CLAIM CONTROL</button>
+            <button class="ghost" id="takeControlBtn">TAKE OVER</button>
+          </div>
           <div class="statusBox">
             <div class="statusLine"><span class="dot" id="dbDot"></span>Realtime link<small id="dbState">DEMO MODE</small></div>
+            <div class="statusLine"><span class="dot" id="leaseDot"></span>Controller lease<small id="leaseState">UNCLAIMED</small></div>
             <div class="statusLine"><span class="dot good"></span>Local tab testing<small>ACTIVE</small></div>
             <div class="statusLine"><span class="dot" id="offsetDot"></span>Server clock<small id="offsetState">LOCAL</small></div>
           </div>
@@ -304,12 +309,12 @@ input[type=range]{width:100%;accent-color:#a9c3ff}
     </div>
   </main>
 
-  <div class="footer">CrowdLight prototype v0.9.1 • timing reliability pass</div>
+  <div class="footer">CrowdLight prototype v0.9.2 • controller lease hardening</div>
 </div>
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-app.js";
-import { getDatabase, ref as dbRef, set as dbSet, onValue as dbOnValue } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
+import { getDatabase, ref as dbRef, set as dbSet, onValue as dbOnValue, runTransaction as dbRunTransaction } from "https://www.gstatic.com/firebasejs/12.18.0/firebase-database.js";
 
 (() => {
 'use strict';
@@ -329,6 +334,9 @@ const TORCH_ON_TIMEOUT_MS = 1200;
 const TORCH_OFF_TIMEOUT_MS = 650;
 const RATE_JITTER_TOLERANCE_MS = 12;
 const CLOCK_REARM_THRESHOLD_MS = 35;
+const CONTROL_LEASE_MS = 12000;
+const CONTROL_LEASE_REFRESH_MS = 4000;
+const CONTROL_LEASE_GRACE_MS = 500;
 const DIAGNOSTICS = qs.get('diag') === '1';
 
 let room = DEFAULT_ROOM;
@@ -353,6 +361,8 @@ let clockRefreshTimer = null;
 let localChannel = null;
 let patternTimer = null;
 let patternStopTimer = null;
+let audienceLeaseTimer = null;
+let audienceLeaseVersion = 0;
 let lastCommandId = '';
 const latestControllerRevision = new Map();
 let audienceCommandVersion = 0;
@@ -369,6 +379,11 @@ let keepAliveTimer = null;
 let masterActionVersion = 0;
 let masterControllerId = '';
 let masterControllerRevision = 0;
+let masterLeaseId = '';
+let masterLeaseUntil = 0;
+let masterLeaseTimer = null;
+let masterLeaseRenewing = false;
+let observedControlLease = null;
 let division = 1;
 let selectedEffect = 'unison';
 let taps = [];
@@ -981,6 +996,20 @@ async function watchFirebaseInfo(){
     }
   }));
 
+  if(IS_MASTER){
+    firebaseInfoUnsubs.push(dbOnValue(dbRef(firebaseDb,controlLeasePath()),snap=>{
+      observedControlLease=snap.val() || null;
+      updateMasterLeaseUI(observedControlLease);
+      const active=leaseIsActive(observedControlLease);
+      const mine=active &&
+        observedControlLease.controllerId===masterControllerId &&
+        observedControlLease.leaseId===masterLeaseId;
+      if(masterLeaseUntil && !mine){
+        loseMasterControl('Another controller now owns this CrowdLight room. Commands from this web master have stopped.');
+      }
+    }));
+  }
+
   startClockRefresh();
 }
 
@@ -1041,11 +1070,144 @@ async function getServerOffset(){
   }
 }
 
+function roomStatePath(){
+  return 'crowdlight/' + room;
+}
 function commandPath(){
-  return 'crowdlight/' + room + '/command';
+  return roomStatePath() + '/command';
+}
+function controlLeasePath(){
+  return roomStatePath() + '/controlLease';
+}
+function leaseIsActive(lease,now=nowServer()){
+  return !!lease && typeof lease==='object' &&
+    typeof lease.controllerId==='string' && !!lease.controllerId &&
+    typeof lease.leaseId==='string' && !!lease.leaseId &&
+    Number.isFinite(Number(lease.leaseUntil)) &&
+    Number(lease.leaseUntil) > now-CONTROL_LEASE_GRACE_MS;
+}
+function commandMatchesLease(cmd,lease){
+  return !!cmd && !!lease &&
+    cmd.controllerId===lease.controllerId &&
+    cmd.leaseId===lease.leaseId;
+}
+function updateMasterLeaseUI(lease=observedControlLease){
+  if(!IS_MASTER) return;
+  const dot=$('#leaseDot'), state=$('#leaseState');
+  if(!dot || !state) return;
+  const active=leaseIsActive(lease);
+  const mine=active && lease.controllerId===masterControllerId && lease.leaseId===masterLeaseId;
+  dot.className='dot '+(mine?'good':active?'warn':'');
+  if(mine){
+    state.textContent='CONTROL OWNED';
+  }else if(active){
+    state.textContent=(lease.ownerType==='bridge'?'BRIDGE':'OTHER CONTROLLER')+' ACTIVE';
+  }else{
+    state.textContent='AVAILABLE';
+  }
+}
+function stopMasterLeaseRenewal(){
+  if(masterLeaseTimer) clearInterval(masterLeaseTimer);
+  masterLeaseTimer=null;
+  masterLeaseUntil=0;
+  masterLeaseRenewing=false;
+}
+function loseMasterControl(reason='Controller lease lost.'){
+  stopMasterLeaseRenewal();
+  currentMasterCommand=null;
+  clearInterval(keepAliveTimer);
+  keepAliveTimer=null;
+  musicSyncRunning=false;
+  $('#musicSyncBtn').textContent='START MUSIC SYNC';
+  $('#startBpmBtn').textContent='START BPM FLASHING';
+  updateMasterLeaseUI(observedControlLease);
+  showCommandResult(reason,false);
+  log(reason);
+}
+function startMasterLeaseRenewal(){
+  if(masterLeaseTimer) clearInterval(masterLeaseTimer);
+  masterLeaseTimer=setInterval(async()=>{
+    if(masterLeaseRenewing || !masterLeaseId) return;
+    masterLeaseRenewing=true;
+    const ok=await ensureMasterLease(false,{renew:true});
+    masterLeaseRenewing=false;
+    if(!ok && masterLeaseUntil && nowServer()>masterLeaseUntil-CONTROL_LEASE_GRACE_MS){
+      loseMasterControl('Controller lease expired or was taken over. Show commands stopped.');
+    }
+  },CONTROL_LEASE_REFRESH_MS);
+}
+async function ensureMasterLease(force=false,{renew=false}={}){
+  if(!IS_MASTER) return true;
+  if(!masterLeaseId) masterLeaseId='lease-'+uid();
+
+  if(TEST_MODE){
+    const now=nowServer();
+    const current=window.__crowdlightTestControlLease || null;
+    const mine=leaseIsActive(current,now) &&
+      current.controllerId===masterControllerId && current.leaseId===masterLeaseId;
+    if(!force && leaseIsActive(current,now) && !mine){
+      observedControlLease=current;
+      updateMasterLeaseUI(current);
+      return false;
+    }
+    const lease={
+      protocolVersion:1,
+      controllerId:masterControllerId,
+      leaseId:masterLeaseId,
+      ownerType:'web',
+      acquiredAt:mine?Number(current.acquiredAt)||now:now,
+      leaseUntil:now+CONTROL_LEASE_MS
+    };
+    window.__crowdlightTestControlLease=lease;
+    observedControlLease=lease;
+    masterLeaseUntil=lease.leaseUntil;
+    updateMasterLeaseUI(lease);
+    startMasterLeaseRenewal();
+    return true;
+  }
+
+  if(!dbUrl || !await ensureFirebase()) return false;
+  const now=nowServer();
+  try{
+    const result=await dbRunTransaction(dbRef(firebaseDb,controlLeasePath()),current=>{
+      const active=leaseIsActive(current,now);
+      const mine=active &&
+        current.controllerId===masterControllerId &&
+        current.leaseId===masterLeaseId;
+      if(active && !mine && !force) return;
+      return {
+        protocolVersion:1,
+        controllerId:masterControllerId,
+        leaseId:masterLeaseId,
+        ownerType:'web',
+        acquiredAt:mine ? (Number(current.acquiredAt)||now) : now,
+        leaseUntil:now+CONTROL_LEASE_MS
+      };
+    },{applyLocally:false});
+    const lease=result.snapshot?.val?.() || null;
+    observedControlLease=lease;
+    updateMasterLeaseUI(lease);
+    if(!result.committed || lease?.controllerId!==masterControllerId || lease?.leaseId!==masterLeaseId){
+      if(!renew) showCommandResult('Room control is held by another controller. Use TAKE OVER only if intentional.',false);
+      return false;
+    }
+    masterLeaseUntil=Number(lease.leaseUntil)||0;
+    startMasterLeaseRenewal();
+    if(!renew) log(force?'Control lease taken over by this web master.':'Control lease acquired by this web master.');
+    return true;
+  }catch(e){
+    if(!renew) log('Controller lease error: '+(e?.message||e));
+    return false;
+  }
 }
 
 async function pushRemoteCommand(cmd){
+  if(IS_MASTER){
+    const leaseOk=await ensureMasterLease(false);
+    if(!leaseOk) return false;
+    cmd.leaseId=masterLeaseId;
+    cmd.leaseUntil=masterLeaseUntil;
+  }
   if(TEST_MODE){
     const delay=Math.max(0,Number(window.__crowdlightTestWriteDelayMs)||0);
     if(delay) await sleep(delay);
@@ -1153,10 +1315,11 @@ async function connectRemoteAudience(){
     if(!await ensureFirebase()) throw new Error('Firebase is not configured.');
     await watchFirebaseInfo();
 
-    commandSource=dbOnValue(dbRef(firebaseDb,commandPath()),snap=>{
-      const cmd=snap.val();
-      if(cmd) receiveCommand(cmd,'firebase');
-      else failSafeAudienceOff('Controller command was cleared. Waiting safely…');
+    commandSource=dbOnValue(dbRef(firebaseDb,roomStatePath()),snap=>{
+      const state=snap.val() || {};
+      const lease=state.controlLease || null;
+      const cmd=state.command || null;
+      handleRoomSnapshot(cmd,lease,'firebase');
     },err=>{
       setNet('Firebase error','warn');
       $('#audienceConnDot').className='dot warn';
@@ -1175,6 +1338,46 @@ async function connectRemoteAudience(){
 function clearAudienceTimers(){
   if(patternTimer){ clearTimeout(patternTimer); patternTimer=null; }
   if(patternStopTimer){ clearTimeout(patternStopTimer); patternStopTimer=null; }
+}
+function clearAudienceLeaseTimer(){
+  if(audienceLeaseTimer){ clearTimeout(audienceLeaseTimer); audienceLeaseTimer=null; }
+}
+function armAudienceLeaseExpiry(lease){
+  clearAudienceLeaseTimer();
+  const version=++audienceLeaseVersion;
+  const delay=Math.max(0,Number(lease.leaseUntil)-nowServer());
+  audienceLeaseTimer=setTimeout(()=>{
+    if(version!==audienceLeaseVersion) return;
+    failSafeAudienceOff('The show controller lease expired. Waiting for an active controller…');
+  },delay+CONTROL_LEASE_GRACE_MS);
+}
+function handleRoomSnapshot(cmd,lease,source){
+  // Backwards-compatible prototype behaviour: a room that has never created a
+  // lease may still accept legacy v0.4 controllers. Once a lease node exists,
+  // the room becomes lease-enforced and stale/foreign controller writes cannot
+  // take over audience phones.
+  if(lease){
+    if(!leaseIsActive(lease)){
+      clearAudienceLeaseTimer();
+      failSafeAudienceOff('The show controller lease expired. Waiting for an active controller…');
+      return;
+    }
+    armAudienceLeaseExpiry(lease);
+    if(!cmd){
+      failSafeAudienceOff('Controller command was cleared. Waiting safely…');
+      return;
+    }
+    if(!commandMatchesLease(cmd,lease)){
+      failSafeAudienceOff('Ignoring a command from a controller that does not own this room.');
+      return;
+    }
+    receiveCommand(cmd,source);
+    return;
+  }
+
+  clearAudienceLeaseTimer();
+  if(cmd) receiveCommand(cmd,source);
+  else failSafeAudienceOff('Controller command was cleared. Waiting safely…');
 }
 
 function clearPattern(){
@@ -1221,7 +1424,7 @@ function failSafeAudienceOff(reason=''){
   }
 }
 
-function validateCommand(cmd){
+function parseCommandIdentity(cmd){
   if(!cmd || typeof cmd!=='object') return {ok:false,reason:'Missing command'};
   if(Number(cmd.protocolVersion)!==1) return {ok:false,reason:'Unsupported command protocol'};
   if(typeof cmd.controllerId!=='string' || !cmd.controllerId || cmd.controllerId.length>80){
@@ -1229,6 +1432,13 @@ function validateCommand(cmd){
   }
   const revision=Number(cmd.revision);
   if(!Number.isSafeInteger(revision) || revision<1) return {ok:false,reason:'Invalid controller revision'};
+  return {ok:true,controllerId:cmd.controllerId,revision};
+}
+
+function normalizeCommand(cmd){
+  const identity=parseCommandIdentity(cmd);
+  if(!identity.ok) return identity;
+
   const mode=cmd.mode;
   if(!['off','steady','flash','pattern'].includes(mode)) return {ok:false,reason:'Unknown command mode'};
   if(cmd.room && cleanRoom(String(cmd.room))!==room) return {ok:false,reason:'Wrong room'};
@@ -1239,6 +1449,17 @@ function validateCommand(cmd){
   if(validUntil < now-500) return {ok:false,reason:'Expired command'};
   if(validUntil > now+120000) return {ok:false,reason:'Command expiry is too far in the future'};
 
+  const normalized={
+    ...cmd,
+    protocolVersion:1,
+    controllerId:identity.controllerId,
+    revision:identity.revision,
+    mode,
+    room:cleanRoom(String(cmd.room || room)),
+    issuedAt:Number(cmd.issuedAt),
+    validUntil
+  };
+
   if(mode==='steady' || mode==='flash' || mode==='pattern'){
     if(!serverClockReady || serverClockAgeMs()>120000){
       return {ok:false,reason:'Server clock is not ready'};
@@ -1246,26 +1467,33 @@ function validateCommand(cmd){
     const startAt=Number(cmd.startAt);
     if(!Number.isFinite(startAt)) return {ok:false,reason:'Missing start time'};
     if(startAt > now+30000) return {ok:false,reason:'Start time is too far in the future'};
+    normalized.startAt=startAt;
   }
 
   if(mode==='flash'){
     const flashMs=Number(cmd.flashMs);
     if(!Number.isFinite(flashMs) || flashMs<35 || flashMs>250) return {ok:false,reason:'Invalid flash duration'};
+    normalized.flashMs=flashMs;
   }
 
   if(mode==='pattern'){
     const bpm=Number(cmd.bpm);
     const div=Number(cmd.division);
-    const phase=Number(cmd.phaseStart ?? cmd.startAt);
+    const phase=Number(cmd.phaseStart ?? normalized.startAt);
+    const flashMs=Number(cmd.flashMs);
     if(!Number.isFinite(bpm) || bpm<30 || bpm>240) return {ok:false,reason:'Invalid BPM'};
     if(![1,2,4].includes(div)) return {ok:false,reason:'Invalid beat division'};
     if(!Number.isFinite(phase)) return {ok:false,reason:'Invalid pattern phase'};
     if(!EFFECTS.includes(cmd.effect)) return {ok:false,reason:'Invalid effect'};
-    const flashMs=Number(cmd.flashMs);
     if(!Number.isFinite(flashMs) || flashMs<35 || flashMs>250) return {ok:false,reason:'Invalid flash duration'};
+    normalized.bpm=bpm;
+    normalized.division=div;
+    normalized.phaseStart=phase;
+    normalized.flashMs=flashMs;
+    normalized.effect=cmd.effect;
   }
 
-  return {ok:true};
+  return {ok:true,cmd:normalized};
 }
 
 function gridRateAllows(effect,tickIndex,periodMs){
@@ -1285,7 +1513,8 @@ function gridRateAllows(effect,tickIndex,periodMs){
 function samePersistentLease(cmd){
   const a=activeAudienceCommand;
   if(!a || a.token!==audienceCommandVersion || a.mode!==cmd.mode) return false;
-  if(cmd.mode==='steady') return true;
+  if(a.controllerId!==cmd.controllerId || (a.leaseId||'')!==(cmd.leaseId||'')) return false;
+  if(cmd.mode==='steady') return Number(a.startAt)===Number(cmd.startAt);
   if(cmd.mode!=='pattern') return false;
   return Number(a.phaseStart)===Number(cmd.phaseStart) &&
     Number(a.bpm)===Number(cmd.bpm) &&
@@ -1314,34 +1543,44 @@ function commandStillCurrent(token,{oneShot=false}={}){
   return true;
 }
 
-function receiveCommand(cmd,source){
+function receiveCommand(rawCmd,source){
   if(!track) return;
 
   diagEvent('command-received',{
     source,
-    mode:cmd?.mode || null,
-    effect:cmd?.effect || null,
-    controllerId:cmd?.controllerId || null,
-    revision:Number(cmd?.revision)||0,
-    startAt:Number(cmd?.startAt)||null,
-    phaseStart:Number(cmd?.phaseStart)||null
+    mode:rawCmd?.mode || null,
+    effect:rawCmd?.effect || null,
+    controllerId:rawCmd?.controllerId || null,
+    revision:Number(rawCmd?.revision)||0,
+    startAt:Number(rawCmd?.startAt)||null,
+    phaseStart:Number(rawCmd?.phaseStart)||null
   });
 
-  const validity=validateCommand(cmd);
-  if(!validity.ok){
+  const identity=parseCommandIdentity(rawCmd);
+  if(!identity.ok){
+    failSafeAudienceOff('Invalid show command identity. Waiting for a fresh controller command…');
+    return;
+  }
+
+  // Stale/duplicate revisions are inert before expiry/schema checks. An old
+  // packet must never be able to switch a phone OFF merely because it expired
+  // while a newer revision from the same controller is already active.
+  const previousRevision=latestControllerRevision.get(identity.controllerId)||0;
+  if(identity.revision<=previousRevision) return;
+
+  const normalized=normalizeCommand(rawCmd);
+  if(!normalized.ok){
+    latestControllerRevision.set(identity.controllerId,identity.revision);
     failSafeAudienceOff('Invalid or stale show command. Waiting for a fresh controller command…');
     return;
   }
+  const cmd=normalized.cmd;
+  latestControllerRevision.set(cmd.controllerId,cmd.revision);
 
   if(document.visibilityState==='hidden'){
     failSafeAudienceOff('CrowdLight paused while this page is in the background.');
     return;
   }
-
-  const revision=Number(cmd.revision);
-  const previousRevision=latestControllerRevision.get(cmd.controllerId)||0;
-  if(revision<=previousRevision) return;
-  latestControllerRevision.set(cmd.controllerId,revision);
 
   if(cmd.id && cmd.id===lastCommandId) return;
   lastCommandId=cmd.id || '';
@@ -1634,6 +1873,10 @@ function refreshAudienceLink(){
   $('#audienceLink').value=buildAudienceUrl();
 }
 async function saveConfig(){
+  stopMasterLeaseRenewal();
+  masterLeaseId='';
+  observedControlLease=null;
+  updateMasterLeaseUI(null);
   room=cleanRoom($('#roomInput').value);
   dbUrl=normalizeDb($('#dbUrlInput').value);
   localStorage.setItem('crowdlight_room',room);
@@ -1927,6 +2170,14 @@ function initMaster(){
   saveConfig();
 
   $('#saveConfigBtn').onclick=saveConfig;
+  $('#claimControlBtn').onclick=async()=>{
+    const ok=await ensureMasterLease(false);
+    showCommandResult(ok?'This web master now owns the room.':'Control is held by another controller.',ok);
+  };
+  $('#takeControlBtn').onclick=async()=>{
+    const ok=await ensureMasterLease(true);
+    showCommandResult(ok?'CONTROL TAKEN OVER. Previous controller commands are now rejected.':'Could not take control of the room.',ok);
+  };
   $('#copyLinkBtn').onclick=async()=>{
     refreshAudienceLink();
     try{await navigator.clipboard.writeText($('#audienceLink').value); $('#copyLinkBtn').textContent='COPIED'; setTimeout(()=>$('#copyLinkBtn').textContent='COPY CROWD LINK',1200)}
@@ -2073,6 +2324,11 @@ function registerOnset(now,energy,avg,sd){
 window.__crowdlightGetTimingDiagnostics=()=>JSON.parse(JSON.stringify(timingDiagnosticsPayload()));
 if(TEST_MODE){
   window.__crowdlightTestSetServerOffset=offset=>updateServerClock(Number(offset)||0);
+  window.__crowdlightTestSetControlLease=lease=>{
+    window.__crowdlightTestControlLease=lease ? JSON.parse(JSON.stringify(lease)) : null;
+    observedControlLease=window.__crowdlightTestControlLease;
+    updateMasterLeaseUI(observedControlLease);
+  };
   window.__crowdlightTestState=()=>({
     audienceCommandVersion,
     audienceSessionVersion,
