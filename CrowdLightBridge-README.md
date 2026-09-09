@@ -6,7 +6,7 @@ The Swift source lives in the `CrowdLightBridge/` directory. GitHub Actions runs
 
 ## Current prototype
 
-Version: **0.4**
+Version: **0.5**
 
 - macOS 11+
 - Apple Silicon (arm64) + Intel (x86_64)
@@ -16,8 +16,9 @@ Version: **0.4**
 - dedicated controller identity + increasing command revisions
 - Firebase server-clock probe using a server timestamp round trip
 - stale REST-completion repair
+- renewable single-controller room lease with explicit takeover
 - CoreMIDI multi-packet traversal tests
-- selected MIDI-source loss automatically disarms external cues
+- selected MIDI-source loss automatically disarms external cues and issues a fail-safe BLACKOUT while the Bridge still owns the room
 - startup is idempotent
 - external MIDI cues start disabled every launch
 - manual BLACKOUT remains available
@@ -34,7 +35,7 @@ ProPresenter → dedicated macOS IAC bus named **CrowdLight** → CrowdLight Bri
 
 The default dedicated MIDI channel is **16**.
 
-CrowdLight Bridge has no MIDI output or MIDI-through path. Existing ProPresenter MIDI devices should remain separate from the CrowdLight IAC bus.
+CrowdLight Bridge has no MIDI-through path. Its only MIDI output is the isolated TEST MIDI PATH diagnostic, which sends reserved Note 127 to the selected CrowdLight IAC destination. Existing ProPresenter MIDI devices should remain separate from the CrowdLight IAC bus.
 
 ## Cue map
 
