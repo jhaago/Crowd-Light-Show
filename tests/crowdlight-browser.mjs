@@ -295,6 +295,69 @@ async function testAudienceSuccess(browser) {
   assert.ok(fake.toggles.some(x => x.on === false), "Confirmation flash never turned off");
   assert.equal(await page.textContent("#audienceConn"), "TEST");
 
+  // Room ownership: a valid owner command should run, a foreign overwrite
+  // should be ignored while the owner command remains valid, and an explicit
+  // takeover should invalidate the old owner's state until the new owner sends.
+  const leaseA = {
+    protocolVersion: 1,
+    controllerId: "lease-owner-a",
+    leaseId: "lease-a",
+    ownerType: "web",
+    acquiredAt: Date.now(),
+    leaseUntil: Date.now() + 5000
+  };
+  await page.evaluate(lease => window.__crowdlightInjectRoomSnapshot({
+    protocolVersion: 1,
+    controllerId: lease.controllerId,
+    leaseId: lease.leaseId,
+    revision: 1,
+    id: "lease-a-steady",
+    mode: "steady",
+    room: "MAIN",
+    issuedAt: Date.now(),
+    startAt: Date.now() + 20,
+    validUntil: Date.now() + 1800
+  }, lease), leaseA);
+  await page.waitForTimeout(80);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true, "Lease owner command did not execute");
+
+  await page.evaluate(lease => window.__crowdlightInjectRoomSnapshot({
+    protocolVersion: 1,
+    controllerId: "foreign-controller",
+    leaseId: "foreign-lease",
+    revision: 1,
+    id: "foreign-overwrite",
+    mode: "off",
+    room: "MAIN",
+    issuedAt: Date.now(),
+    validUntil: Date.now() + 60000
+  }, lease), leaseA);
+  await page.waitForTimeout(80);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true, "Foreign command interrupted the active lease owner's valid command");
+
+  const leaseB = {
+    protocolVersion: 1,
+    controllerId: "lease-owner-b",
+    leaseId: "lease-b",
+    ownerType: "bridge",
+    acquiredAt: Date.now(),
+    leaseUntil: Date.now() + 5000
+  };
+  await page.evaluate(lease => window.__crowdlightInjectRoomSnapshot({
+    protocolVersion: 1,
+    controllerId: "lease-owner-a",
+    leaseId: "lease-a",
+    revision: 2,
+    id: "old-owner-after-takeover",
+    mode: "steady",
+    room: "MAIN",
+    issuedAt: Date.now(),
+    startAt: Date.now() + 20,
+    validUntil: Date.now() + 1800
+  }, lease), leaseB);
+  await page.waitForTimeout(100);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "Lease takeover did not invalidate the old controller's state");
+
   // Revision ordering: after a newer BLACKOUT from one controller, an older
   // command from that SAME controller must be ignored even if delivered later.
   await page.evaluate(() => window.__crowdlightInjectCommand({
