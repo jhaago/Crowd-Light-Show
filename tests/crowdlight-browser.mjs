@@ -21,6 +21,13 @@ async function stubFirebase(page) {
         export async function set(){ return; }
         export function onValue(ref,cb){ return ()=>{}; }
         export async function get(){ return { val(){ return 0; } }; }
+        export async function runTransaction(ref, updater){
+          const next = updater(null);
+          return {
+            committed: next !== undefined,
+            snapshot: { val(){ return next === undefined ? null : next; } }
+          };
+        }
       `
     })
   );
@@ -54,6 +61,27 @@ async function testMaster(browser) {
   await page.goto(base + "?master=1&test=1", { waitUntil: "networkidle" });
   await page.waitForSelector("#masterView:not(.hidden)");
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1), true, "Master page overflows horizontally on a phone viewport");
+
+  // A live foreign controller lease must block BOTH local-tab and remote test
+  // writes until the operator explicitly takes control.
+  await page.evaluate(() => window.__crowdlightTestSetControlLease({
+    protocolVersion: 1,
+    controllerId: "other-controller",
+    leaseId: "other-lease",
+    ownerType: "bridge",
+    acquiredAt: Date.now(),
+    leaseUntil: Date.now() + 60000
+  }));
+  const blockedBefore = await page.evaluate(() => (window.__crowdlightTestCommands || []).length);
+  await page.click("#allOnBtn");
+  await page.waitForTimeout(100);
+  const blockedAfter = await page.evaluate(() => (window.__crowdlightTestCommands || []).length);
+  assert.equal(blockedAfter, blockedBefore, "Foreign room lease did not block master command publication");
+  assert.match(await page.textContent("#commandResult"), /another controller|held/i);
+
+  await page.click("#takeControlBtn");
+  await page.waitForTimeout(80);
+  assert.match(await page.textContent("#leaseState"), /CONTROL OWNED/i);
 
   await page.click("#allOnBtn");
   await waitForCommand(page, cmd => cmd && cmd.mode === "steady");
@@ -287,6 +315,63 @@ async function testAudienceSuccess(browser) {
   }));
   await page.waitForTimeout(100);
   assert.equal(await page.evaluate(() => window.__fakeTorch.on), false, "Older controller revision overrode newer BLACKOUT");
+
+  // A stale lower revision must be ignored BEFORE expiry/schema validation.
+  // It must not fail-safe OFF a newer valid state.
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    controllerId: "stale-validation-controller",
+    revision: 10,
+    id: "newer-valid-steady",
+    mode: "steady",
+    startAt: Date.now() + 20,
+    validUntil: Date.now() + 1200
+  }));
+  await page.waitForTimeout(80);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true);
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    controllerId: "stale-validation-controller",
+    revision: 9,
+    id: "older-expired-command",
+    mode: "steady",
+    startAt: Date.now() - 2000,
+    validUntil: Date.now() - 1500
+  }));
+  await page.waitForTimeout(80);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true, "Expired lower revision incorrectly forced OFF");
+
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-stale-validation",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(80);
+
+  // Pattern commands may use startAt as the canonical phase when phaseStart is
+  // omitted. Execution must receive the normalized numeric phase, never NaN.
+  const normalizedPhase = Date.now() + 120;
+  await page.evaluate(phase => window.__crowdlightInjectCommand({
+    controllerId: "normalization-controller",
+    revision: 1,
+    id: "pattern-without-phase-start",
+    mode: "pattern",
+    bpm: 90,
+    division: 1,
+    effect: "glow",
+    flashMs: 90,
+    startAt: phase,
+    validUntil: Date.now() + 1600
+  }), normalizedPhase);
+  await page.waitForTimeout(50);
+  const normalizedState = await page.evaluate(() => window.__crowdlightTestState().activeAudienceCommand);
+  assert.equal(Number.isFinite(normalizedState?.phaseStart), true, "Missing phaseStart was not canonicalized from startAt");
+  assert.equal(Math.round(normalizedState.phaseStart), Math.round(normalizedPhase));
+
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-normalization",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(80);
 
   // Steady ON and BLACKOUT command handling.
   await page.evaluate(() => window.__crowdlightInjectCommand({
