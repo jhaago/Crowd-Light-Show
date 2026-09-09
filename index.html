@@ -1201,12 +1201,17 @@ async function ensureMasterLease(force=false,{renew=false}={}){
   }
 }
 
-async function pushRemoteCommand(cmd){
-  if(IS_MASTER){
+function stampMasterLease(cmd){
+  if(!IS_MASTER) return cmd;
+  cmd.leaseId=masterLeaseId;
+  cmd.leaseUntil=masterLeaseUntil;
+  return cmd;
+}
+async function pushRemoteCommand(cmd,{leaseChecked=false}={}){
+  if(IS_MASTER && !leaseChecked){
     const leaseOk=await ensureMasterLease(false);
     if(!leaseOk) return false;
-    cmd.leaseId=masterLeaseId;
-    cmd.leaseUntil=masterLeaseUntil;
+    stampMasterLease(cmd);
   }
   if(TEST_MODE){
     const delay=Math.max(0,Number(window.__crowdlightTestWriteDelayMs)||0);
@@ -1234,11 +1239,17 @@ async function pushRemoteCommand(cmd){
 async function publishCommand(cmd,{keep=false,actionVersion=masterActionVersion}={}){
   if(!cmd.id) cmd.id=uid();
 
+  if(IS_MASTER){
+    const leaseOk=await ensureMasterLease(false);
+    if(!leaseOk) return false;
+    stampMasterLease(cmd);
+  }
+
   if(actionVersion===masterActionVersion){
     try{ localChannel?.postMessage({type:'command',command:cmd}); }catch(e){}
   }
 
-  const remoteOk=await pushRemoteCommand(cmd);
+  const remoteOk=await pushRemoteCommand(cmd,{leaseChecked:IS_MASTER});
   const stillCurrent=actionVersion===masterActionVersion;
 
   if(IS_MASTER && stillCurrent){
@@ -1265,6 +1276,13 @@ function resetKeepAlive(actionVersion=masterActionVersion){
   clearInterval(keepAliveTimer);
   keepAliveTimer=setInterval(async()=>{
     if(actionVersion!==masterActionVersion || !currentMasterCommand) return;
+    if(IS_MASTER){
+      const leaseOk=await ensureMasterLease(false);
+      if(!leaseOk){
+        loseMasterControl('Controller lease was lost. Persistent show commands stopped.');
+        return;
+      }
+    }
     const c={
       ...currentMasterCommand,
       id:uid(),
@@ -1272,9 +1290,10 @@ function resetKeepAlive(actionVersion=masterActionVersion){
       issuedAt:nowServer(),
       validUntil:nowServer()+COMMAND_TTL
     };
+    stampMasterLease(c);
     currentMasterCommand=c;
     try{ localChannel?.postMessage({type:'command',command:c}); }catch(e){}
-    const ok=await pushRemoteCommand(c);
+    const ok=await pushRemoteCommand(c,{leaseChecked:IS_MASTER});
     if(actionVersion!==masterActionVersion) return;
     if(!ok){
       $('#dbDot').className='dot warn';
@@ -1950,6 +1969,10 @@ function commandBase(mode){
 }
 async function masterOff(){
   const actionVersion=beginMasterAction();
+  if(IS_MASTER && !await ensureMasterLease(false)){
+    showCommandResult('BLACKOUT was not sent because another controller owns this room.',false);
+    return;
+  }
   currentMasterCommand=null;
   clearInterval(keepAliveTimer);
   keepAliveTimer=null;
@@ -1963,16 +1986,16 @@ async function masterOff(){
   showCommandResult('Sending BLACKOUT…',true);
   markSent($('#blackoutBtn'));
 
-  const offCmd={...commandBase('off'),validUntil:nowServer()+60000};
+  const offCmd=stampMasterLease({...commandBase('off'),validUntil:nowServer()+60000});
   try{ localChannel?.postMessage({type:'command',command:offCmd}); }catch(e){}
-  const ok=await pushRemoteCommand(offCmd);
+  const ok=await pushRemoteCommand(offCmd,{leaseChecked:IS_MASTER});
   if(masterActionVersion!==actionVersion) return;
   showCommandResult(ok?'BLACKOUT sent successfully.':'BLACKOUT failed to send.',ok);
 
   if(ok){
     setTimeout(()=>{
       if(masterActionVersion===actionVersion){
-        pushRemoteCommand({...commandBase('off'),validUntil:nowServer()+60000});
+        pushRemoteCommand(stampMasterLease({...commandBase('off'),validUntil:nowServer()+60000}),{leaseChecked:IS_MASTER});
       }
     },350);
   }
@@ -1996,6 +2019,10 @@ async function masterOn(){
 
 async function masterFlash(){
   const actionVersion=beginMasterAction();
+  if(IS_MASTER && !await ensureMasterLease(false)){
+    showCommandResult('SYNC FLASH was not sent because another controller owns this room.',false);
+    return;
+  }
   const previous=currentMasterCommand ? {...currentMasterCommand} : null;
   const previousMusic=musicSyncRunning;
   musicManualBlockUntil=Date.now()+1700;
@@ -2006,13 +2033,13 @@ async function masterFlash(){
   currentMasterCommand=null;
 
   const startAt=nowServer()+900;
-  const cmd={...commandBase('flash'),startAt,validUntil:startAt+1200,flashMs:+$('#flashMsRange').value};
+  const cmd=stampMasterLease({...commandBase('flash'),startAt,validUntil:startAt+1200,flashMs:+$('#flashMsRange').value});
   $('#masterModeText').textContent='SYNC FLASH';
   setMasterState('flash','SYNC FLASH SENT',`One ${cmd.flashMs} ms flash is scheduled across the crowd.`,'✦');
   showCommandResult('Scheduling synchronized flash…',true);
   markSent($('#flashNowBtn'));
   try{ localChannel?.postMessage({type:'command',command:cmd}); }catch(e){}
-  const ok=await pushRemoteCommand(cmd);
+  const ok=await pushRemoteCommand(cmd,{leaseChecked:IS_MASTER});
   if(masterActionVersion===actionVersion){
     showCommandResult(ok?'SYNC FLASH sent successfully.':'SYNC FLASH failed to send.',ok);
   }
