@@ -89,7 +89,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Accept ProPresenter MIDI cues")
                                 .fontWeight(.semibold)
-                            Text("Off by default for safety. Manual controls always remain available.")
+                            Text("Off by default for safety. Show commands require this Bridge to own the CrowdLight room.")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
