@@ -1,6 +1,9 @@
 import Foundation
 
 final class FirebaseTransport {
+    static let controlLeaseDurationMs: Double = 12_000
+    static let controlLeaseGraceMs: Double = 500
+
     private let session: URLSession
     private let stateLock = NSLock()
     private var _serverOffsetMs: Double = 0
@@ -154,6 +157,201 @@ final class FirebaseTransport {
         }
     }
 
+    static func canAcquireLease(
+        currentControllerID: String?,
+        currentLeaseID: String?,
+        currentLeaseUntil: Double?,
+        requestControllerID: String,
+        requestLeaseID: String,
+        now: Double,
+        force: Bool
+    ) -> Bool {
+        if force { return true }
+
+        let active = (currentLeaseUntil ?? 0) > now - controlLeaseGraceMs
+        if !active { return true }
+
+        return currentControllerID == requestControllerID &&
+            currentLeaseID == requestLeaseID
+    }
+
+    func acquireRoomLease(
+        databaseURL: String,
+        room: String,
+        controllerID: String,
+        leaseID: String,
+        force: Bool,
+        completion: @escaping (Result<BridgeLeaseResult, Error>) -> Void
+    ) {
+        let base = normalizedDatabaseURL(databaseURL)
+        guard !base.isEmpty else {
+            completion(.failure(BridgeNetworkError.invalidDatabaseURL))
+            return
+        }
+
+        acquireRoomLeaseAttempt(
+            databaseURL: base,
+            room: room,
+            controllerID: controllerID,
+            leaseID: leaseID,
+            force: force,
+            attempt: 0,
+            completion: completion
+        )
+    }
+
+    private func acquireRoomLeaseAttempt(
+        databaseURL: String,
+        room: String,
+        controllerID: String,
+        leaseID: String,
+        force: Bool,
+        attempt: Int,
+        completion: @escaping (Result<BridgeLeaseResult, Error>) -> Void
+    ) {
+        let roomPath = pathComponent(room)
+        let urlString = "\(databaseURL)/crowdlight/\(roomPath)/controlLease.json"
+        guard let url = makeURL(urlString) else {
+            completion(.failure(BridgeNetworkError.invalidDatabaseURL))
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        request.setValue("true", forHTTPHeaderField: "X-Firebase-ETag")
+
+        session.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+
+            if let error {
+                completion(.failure(error))
+                return
+            }
+
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode)
+            else {
+                completion(
+                    .failure(
+                        BridgeNetworkError.httpStatus(
+                            (response as? HTTPURLResponse)?.statusCode ?? -1
+                        )
+                    )
+                )
+                return
+            }
+
+            let etag = http.value(forHTTPHeaderField: "ETag") ?? "null_etag"
+            var current: [String: Any] = [:]
+            if let data, !data.isEmpty {
+                do {
+                    let object = try JSONSerialization.jsonObject(
+                        with: data,
+                        options: [.fragmentsAllowed]
+                    )
+                    if let dict = object as? [String: Any] {
+                        current = dict
+                    }
+                } catch {
+                    completion(.failure(BridgeNetworkError.invalidLeaseResponse))
+                    return
+                }
+            }
+
+            let currentController = current["controllerId"] as? String
+            let currentLeaseID = current["leaseId"] as? String
+            let currentUntil = (current["leaseUntil"] as? NSNumber)?.doubleValue
+            let now = self.estimatedServerNowMs()
+
+            let mayAcquire = Self.canAcquireLease(
+                currentControllerID: currentController,
+                currentLeaseID: currentLeaseID,
+                currentLeaseUntil: currentUntil,
+                requestControllerID: controllerID,
+                requestLeaseID: leaseID,
+                now: now,
+                force: force
+            )
+
+            guard mayAcquire else {
+                completion(
+                    .success(
+                        .held(
+                            ownerType: current["ownerType"] as? String ?? "controller",
+                            controllerID: currentController ?? "unknown",
+                            leaseUntil: currentUntil ?? 0
+                        )
+                    )
+                )
+                return
+            }
+
+            let sameLease = currentController == controllerID &&
+                currentLeaseID == leaseID &&
+                (currentUntil ?? 0) > now - Self.controlLeaseGraceMs
+
+            let payload: [String: Any] = [
+                "protocolVersion": 1,
+                "controllerId": controllerID,
+                "leaseId": leaseID,
+                "ownerType": "bridge",
+                "acquiredAt": sameLease
+                    ? ((current["acquiredAt"] as? NSNumber)?.doubleValue ?? now)
+                    : now,
+                "leaseUntil": now + Self.controlLeaseDurationMs
+            ]
+
+            do {
+                let body = try JSONSerialization.data(
+                    withJSONObject: payload,
+                    options: []
+                )
+                var put = URLRequest(url: url)
+                put.httpMethod = "PUT"
+                put.httpBody = body
+                put.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                put.setValue(etag, forHTTPHeaderField: "if-match")
+
+                self.session.dataTask(with: put) { _, putResponse, putError in
+                    if let putError {
+                        completion(.failure(putError))
+                        return
+                    }
+
+                    let status = (putResponse as? HTTPURLResponse)?.statusCode ?? -1
+                    if status == 412, attempt < 3 {
+                        self.acquireRoomLeaseAttempt(
+                            databaseURL: databaseURL,
+                            room: room,
+                            controllerID: controllerID,
+                            leaseID: leaseID,
+                            force: force,
+                            attempt: attempt + 1,
+                            completion: completion
+                        )
+                        return
+                    }
+
+                    guard (200..<300).contains(status) else {
+                        completion(.failure(BridgeNetworkError.httpStatus(status)))
+                        return
+                    }
+
+                    completion(
+                        .success(
+                            .acquired(
+                                leaseUntil: now + Self.controlLeaseDurationMs
+                            )
+                        )
+                    )
+                }.resume()
+            } catch {
+                completion(.failure(error))
+            }
+        }.resume()
+    }
+
     func sendCommand(
         databaseURL: String,
         room: String,
@@ -301,10 +499,16 @@ final class FirebaseTransport {
     }
 }
 
+enum BridgeLeaseResult: Equatable {
+    case acquired(leaseUntil: Double)
+    case held(ownerType: String, controllerID: String, leaseUntil: Double)
+}
+
 enum BridgeNetworkError: LocalizedError {
     case invalidDatabaseURL
     case httpStatus(Int)
     case invalidClockResponse
+    case invalidLeaseResponse
     case clockSampleTooSlow(Double)
 
     var errorDescription: String? {
@@ -320,6 +524,9 @@ enum BridgeNetworkError: LocalizedError {
 
         case .invalidClockResponse:
             return "Firebase did not return a valid server timestamp."
+
+        case .invalidLeaseResponse:
+            return "Firebase returned an invalid CrowdLight controller lease."
 
         case .clockSampleTooSlow(let milliseconds):
             return String(
