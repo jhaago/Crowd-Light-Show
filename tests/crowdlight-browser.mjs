@@ -178,6 +178,8 @@ async function makeAudiencePage(browser, torchSupported = true, options = {}) {
       stopped: false,
       failOff: false,
       failOn: false,
+      hangOff: false,
+      hangOn: false,
       onDelayMs: Number(options.onDelayMs)||0,
       offDelayMs: Number(options.offDelayMs)||0
     };
@@ -206,11 +208,13 @@ async function makeAudiencePage(browser, torchSupported = true, options = {}) {
         const delay = requested ? window.__fakeTorch.onDelayMs : window.__fakeTorch.offDelayMs;
         if (delay) await new Promise(resolve => setTimeout(resolve, delay));
 
+        if (requested && window.__fakeTorch.hangOn) await new Promise(() => {});
+        if (!requested && window.__fakeTorch.hangOff) await new Promise(() => {});
         if (requested && window.__fakeTorch.failOn) throw new Error("simulated ON failure");
         if (!requested && window.__fakeTorch.failOff) throw new Error("simulated OFF failure");
 
         window.__fakeTorch.on = requested;
-        window.__fakeTorch.toggles.push({ on: requested, at: Date.now() });
+        window.__fakeTorch.toggles.push({ on: requested, at: Date.now(), mono: performance.now() });
       },
       stop() {
         this.readyState = "ended";
@@ -329,6 +333,23 @@ async function testAudienceSuccess(browser) {
   fake = await page.evaluate(() => window.__fakeTorch);
   assert.equal(fake.on, false);
   assert.ok(fake.toggles.length >= before + 2, "Scheduled flash did not toggle on/off");
+
+  // A one-shot accepted just before its lateness cutoff must still perform OFF
+  // cleanup after the hold crosses that cutoff.
+  await page.waitForTimeout(520);
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "cutoff-crossing-flash",
+    mode: "flash",
+    startAt: Date.now() - 450,
+    validUntil: Date.now() + 1200,
+    flashMs: 90
+  }));
+  await page.waitForTimeout(220);
+  assert.equal(
+    await page.evaluate(() => window.__fakeTorch.on),
+    false,
+    "One-shot crossing its freshness cutoff skipped OFF cleanup"
+  );
 
   // C4 regression: repeated one-shot commands are subject to the same global
   // physical ON limiter as rhythmic patterns.
@@ -704,6 +725,188 @@ async function testOffFailureStopsStream(browser) {
   await page.close();
 }
 
+async function testNormalHungOffForcesStop(browser) {
+  const page = await makeAudiencePage(browser, true);
+  const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+
+  await page.goto(base + "?test=1", { waitUntil: "networkidle" });
+  await page.click("#joinBtn");
+  await page.waitForSelector("#readyCard:not(.hidden)", { timeout: 4000 });
+
+  const phase = Date.now() + 80;
+  await page.evaluate(phaseStart => window.__crowdlightInjectCommand({
+    id: "hung-off-glow",
+    mode: "pattern",
+    bpm: 120,
+    division: 1,
+    effect: "glow",
+    flashMs: 90,
+    phaseStart,
+    startAt: phaseStart,
+    validUntil: Date.now() + 6000
+  }), phase);
+
+  await page.waitForTimeout(260);
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), true, "Hung-OFF setup did not enter GLOW ON state");
+
+  await page.evaluate(() => { window.__fakeTorch.hangOff = true; });
+  await page.waitForTimeout(1750);
+
+  assert.equal(
+    await page.evaluate(() => window.__fakeTorch.stopped),
+    true,
+    "A normal long-effect OFF hang did not force-stop the camera stream"
+  );
+  assert.equal(await page.evaluate(() => window.__fakeTorch.on), false);
+  assert.deepEqual(errors, [], "Normal hung-OFF test JavaScript errors: " + errors.join(" | "));
+  await page.close();
+}
+
+async function testExact120BpmWithTorchLatency(browser) {
+  const page = await makeAudiencePage(browser, true, { onDelayMs: 20 });
+  const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+
+  await page.goto(base + "?test=1", { waitUntil: "networkidle" });
+  await page.click("#joinBtn");
+  await page.waitForSelector("#readyCard:not(.hidden)", { timeout: 5000 });
+
+  const startIndex = await page.evaluate(() => window.__fakeTorch.toggles.length);
+  const phase = Date.now() + 120;
+  await page.evaluate(phaseStart => window.__crowdlightInjectCommand({
+    id: "exact-120-unison",
+    mode: "pattern",
+    bpm: 120,
+    division: 1,
+    effect: "unison",
+    flashMs: 55,
+    phaseStart,
+    startAt: phaseStart,
+    validUntil: Date.now() + 2600
+  }), phase);
+
+  await page.waitForTimeout(1800);
+  const ons = await page.evaluate(start => (
+    window.__fakeTorch.toggles.slice(start).filter(x => x.on).map(x => x.at)
+  ), startIndex);
+
+  assert.ok(ons.length >= 3, "120 BPM collapsed toward alternate beats when ON had normal Promise latency");
+  for (let i = 1; i < ons.length; i++) {
+    assert.ok(ons[i] - ons[i - 1] >= 480, "120 BPM exceeded the 2 Hz safety interval");
+    assert.ok(ons[i] - ons[i - 1] <= 560, "120 BPM unexpectedly dropped a musical beat");
+  }
+
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-120",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(100);
+
+  assert.deepEqual(errors, [], "Exact-120 test JavaScript errors: " + errors.join(" | "));
+  await page.close();
+}
+
+async function testHighBpmDeterministicParityAcrossClients(browser) {
+  const a = await makeAudiencePage(browser, true, { onDelayMs: 0 });
+  const b = await makeAudiencePage(browser, true, { onDelayMs: 35 });
+  const errors = [];
+  a.on("pageerror", e => errors.push("A: " + e.message));
+  b.on("pageerror", e => errors.push("B: " + e.message));
+
+  await Promise.all([
+    a.goto(base + "?test=1", { waitUntil: "networkidle" }),
+    b.goto(base + "?test=1", { waitUntil: "networkidle" })
+  ]);
+  await Promise.all([a.click("#joinBtn"), b.click("#joinBtn")]);
+  await Promise.all([
+    a.waitForSelector("#readyCard:not(.hidden)", { timeout: 5000 }),
+    b.waitForSelector("#readyCard:not(.hidden)", { timeout: 5000 })
+  ]);
+
+  const [startA, startB] = await Promise.all([
+    a.evaluate(() => window.__fakeTorch.toggles.length),
+    b.evaluate(() => window.__fakeTorch.toggles.length)
+  ]);
+
+  const phase = Date.now() + 180;
+  const command = {
+    id: "deterministic-180",
+    mode: "pattern",
+    bpm: 180,
+    division: 1,
+    effect: "unison",
+    flashMs: 50,
+    phaseStart: phase,
+    startAt: phase,
+    validUntil: Date.now() + 2600
+  };
+  await Promise.all([
+    a.evaluate(cmd => window.__crowdlightInjectCommand(cmd), command),
+    b.evaluate(cmd => window.__crowdlightInjectCommand(cmd), command)
+  ]);
+
+  await Promise.all([a.waitForTimeout(1800), b.waitForTimeout(1800)]);
+  const [onsA, onsB] = await Promise.all([
+    a.evaluate(start => window.__fakeTorch.toggles.slice(start).filter(x => x.on).map(x => x.at), startA),
+    b.evaluate(start => window.__fakeTorch.toggles.slice(start).filter(x => x.on).map(x => x.at), startB)
+  ]);
+
+  assert.ok(onsA.length >= 2 && onsB.length >= 2, "180 BPM deterministic-parity test did not produce enough flashes");
+
+  const tickPeriod = 60000 / 180;
+  const ticksA = onsA.map(t => Math.round((t - phase) / tickPeriod));
+  const ticksB = onsB.map(t => Math.round((t - phase) / tickPeriod));
+  assert.deepEqual(ticksA.slice(0, 2), ticksB.slice(0, 2), "Two clients selected different high-BPM beat parity");
+  assert.equal(ticksA.slice(0, 2).every(n => n % 2 === 0), true, "High-BPM UNISON did not use deterministic even grid ticks");
+
+  assert.deepEqual(errors, [], "Multi-client parity JavaScript errors: " + errors.join(" | "));
+  await Promise.all([a.close(), b.close()]);
+}
+
+async function testClockCorrectionRearmsPattern(browser) {
+  const page = await makeAudiencePage(browser, true);
+  const errors = [];
+  page.on("pageerror", e => errors.push(e.message));
+
+  await page.goto(base + "?test=1", { waitUntil: "networkidle" });
+  await page.click("#joinBtn");
+  await page.waitForSelector("#readyCard:not(.hidden)", { timeout: 4000 });
+
+  const phase = Date.now() + 700;
+  await page.evaluate(phaseStart => window.__crowdlightInjectCommand({
+    id: "clock-rearm-pattern",
+    mode: "pattern",
+    bpm: 90,
+    division: 1,
+    effect: "unison",
+    flashMs: 60,
+    phaseStart,
+    startAt: phaseStart,
+    validUntil: Date.now() + 4000
+  }), phase);
+
+  const before = await page.evaluate(() => window.__crowdlightTestState().audienceCommandVersion);
+  await page.evaluate(() => window.__crowdlightTestSetServerOffset(120));
+  await page.waitForTimeout(80);
+  const after = await page.evaluate(() => window.__crowdlightTestState().audienceCommandVersion);
+  const diag = await page.evaluate(() => window.__crowdlightGetTimingDiagnostics());
+
+  assert.ok(after > before, "Material server-clock correction did not rearm the active pattern timer");
+  assert.equal(diag.events.some(e => e.type === "clock-rearm"), true, "Clock rearm was not recorded in timing diagnostics");
+
+  await page.evaluate(() => window.__crowdlightInjectCommand({
+    id: "off-after-clock-rearm",
+    mode: "off",
+    validUntil: Date.now() + 60000
+  }));
+  await page.waitForTimeout(100);
+
+  assert.deepEqual(errors, [], "Clock-rearm test JavaScript errors: " + errors.join(" | "));
+  await page.close();
+}
+
 async function testAudienceFailure(browser) {
   const page = await makeAudiencePage(browser, false);
   const errors = [];
@@ -728,6 +931,10 @@ try {
   await testPendingOnBlackout(browser);
   await testHungOnBlackoutForcesStop(browser);
   await testOffFailureStopsStream(browser);
+  await testNormalHungOffForcesStop(browser);
+  await testExact120BpmWithTorchLatency(browser);
+  await testHighBpmDeterministicParityAcrossClients(browser);
+  await testClockCorrectionRearmsPattern(browser);
   await testAudienceFailure(browser);
   console.log("CrowdLight browser regression tests passed.");
 } finally {
